@@ -1,0 +1,40 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Secrets and sign-in
+.env
+*.env
+!*.env.example
+users.env
+
+# Private tenant data and local databases
+data/tenants.csv
+data/bills_latest.csv
+data/_*.csv
+!data/sample_tenants.csv
+data/*.db
+data/*.db-*
+data/logs/
+*.sqlite
+*.sqlite3
+
+# Logs and debug captures
+logs/
+billcheck/logs/
+billcheck/debug/
+ownerapp/logs/
+
+# Build output, portable binaries, and zip files
+build/
+dist/
+*.zip
+*.exe
+
+# OS
+.DS_Store
+Thumbs.db

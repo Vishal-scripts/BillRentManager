@@ -1,0 +1,10 @@
+fastapi==0.115.6
+uvicorn==0.34.0
+itsdangerous==2.2.0
+python-multipart==0.0.20
+openpyxl==3.1.5
+httpx==0.28.1
+requests==2.32.3
+pillow==11.3.0
+pytesseract==0.3.13
+playwright==1.55.0

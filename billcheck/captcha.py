@@ -1,0 +1,399 @@
+"""Read the Tata Power-DDL pay-bill captcha (two digits + plus, strikethrough noise)."""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import random
+import re
+import shutil
+import time
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pytesseract
+from PIL import Image, ImageFilter, ImageOps
+
+_WHITELIST = "0123456789+"
+_MAX_OPERAND = 99
+CAPTCHA_DEBUG_DIR = Path(__file__).resolve().parents[1] / "debug_samples" / "captcha"
+
+
+def captcha_tries_from_env(default: int = 8) -> int:
+    """How many captcha images to try for one CA (``BRM_CAPTCHA_TRIES`` or ``NDPL_CAPTCHA_TRIES``)."""
+    raw = ""
+    for key in ("BRM_CAPTCHA_TRIES", "NDPL_CAPTCHA_TRIES"):
+        raw = os.environ.get(key, "").strip()
+        if raw:
+            break
+    if not raw:
+        raw = str(default)
+    try:
+        parsed = int(raw)
+    except ValueError:
+        parsed = default
+    return max(3, min(12, parsed))
+
+
+def captcha_pause(attempt: int = 0, *, min_s: float | None = None, max_s: float | None = None) -> None:
+    """Random delay between captcha attempts; slightly longer on later tries."""
+    base_min = 1.5 if min_s is None else min_s
+    base_max = 4.0 if max_s is None else max_s
+    extra = min(2.0, 0.35 * max(0, attempt))
+    time.sleep(random.uniform(base_min + extra * 0.25, base_max + extra))
+
+
+def _bundled_tesseract_candidates() -> list[str]:
+    found = []
+    home = os.environ.get("NARELA_HOME", "").strip().strip('"')
+    roots = []
+    if home:
+        roots.append(home)
+    roots.append(str(Path(__file__).resolve().parents[1]))
+    for root in roots:
+        found.append(os.path.join(root, "tesseract", "tesseract.exe"))
+    return found
+
+
+def configure_tesseract() -> str | None:
+    configured = os.environ.get("TESSERACT_CMD", "").strip().strip('"')
+    candidates = [configured] if configured else []
+    candidates.extend(_bundled_tesseract_candidates())
+    if os.name == "nt":
+        candidates.extend(
+            (
+                r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            )
+        )
+    which = shutil.which("tesseract")
+    if which:
+        candidates.append(which)
+    chosen = next((path for path in candidates if path and os.path.isfile(path)), None)
+    if not chosen:
+        return None
+    pytesseract.pytesseract.tesseract_cmd = chosen
+    tessdata = os.path.join(os.path.dirname(chosen), "tessdata")
+    if os.path.isdir(tessdata) and not os.environ.get("TESSDATA_PREFIX"):
+        os.environ["TESSDATA_PREFIX"] = tessdata + os.sep
+    return chosen
+
+
+def operands_from_ocr(text: str) -> tuple[int, int] | None:
+    raw = text or ""
+    compact = re.sub(r"\s+", "", raw)
+    if "+" in compact:
+        if re.search(r"\d{3,}", compact):
+            return None
+        match = re.fullmatch(r"(\d{1,2})\+(\d{1,2})", compact)
+        if match:
+            left, right = int(match.group(1)), int(match.group(2))
+            if 0 <= left <= _MAX_OPERAND and 0 <= right <= _MAX_OPERAND:
+                return left, right
+    if "+" not in raw and not re.search(r"\s", raw):
+        return _relaxed_pair(compact)
+    return None
+
+
+def _relaxed_pair(compact: str) -> tuple[int, int] | None:
+    """Fallback when OCR drops the plus sign (e.g. ``2022`` → ``20+22``)."""
+    digits = re.sub(r"\D", "", compact or "")
+    if len(digits) != 4:
+        return None
+    left, right = int(digits[:2]), int(digits[2:])
+    if 0 <= left <= _MAX_OPERAND and 0 <= right <= _MAX_OPERAND:
+        return left, right
+    left, right = int(digits[0]), int(digits[1:])
+    if 0 <= left <= _MAX_OPERAND and 0 <= right <= _MAX_OPERAND:
+        return left, right
+    return None
+
+
+def read_operands(image_bytes: bytes) -> tuple[int, int] | None:
+    total, _meta = solve_captcha(image_bytes)
+    if total is None:
+        return None
+    return _meta.get("chosen_pair")
+
+
+def ocr_addition(image_bytes: bytes) -> int | None:
+    total, _meta = solve_captcha(image_bytes)
+    return total
+
+
+def solve_captcha(image_bytes: bytes) -> tuple[int | None, dict[str, Any]]:
+    """OCR with preprocessings × PSM 7/8/13; majority vote, then best format match."""
+    configure_tesseract()
+    image = _flatten_rgba(Image.open(io.BytesIO(image_bytes)))
+    votes: Counter[tuple[int, int]] = Counter()
+    raw_reads: list[str] = []
+    small = max(image.size) < 140
+    scale = 8 if max(image.size) < 120 else (6 if small else 3)
+    variants = [
+        _plain_gray(image, scale=scale, threshold=120),
+        _plain_gray(image, scale=scale, threshold=135),
+        _plain_gray(image, scale=scale + 1, threshold=128),
+        _inverted_variant(image, scale=scale),
+        _gray_variant(image, scale=scale, threshold=140),
+        _gray_variant(image, scale=scale, threshold=160),
+        _otsu_variant(image, scale=scale),
+        _green_variant(image, scale=scale),
+        _sharpen_variant(image, scale=scale),
+        _median_variant(image, scale=scale),
+    ]
+    if small:
+        variants.extend(
+            [
+                _plain_gray(image, scale=scale + 2, threshold=125),
+                _gray_variant(image, scale=scale + 1, threshold=130),
+                _median_variant(image, scale=scale + 1),
+            ]
+        )
+    for variant in variants:
+        for psm in (7, 8, 13):
+            text, pair = _read_with_text(variant, psm)
+            if text:
+                raw_reads.append(text.strip())
+            if pair is not None:
+                votes[pair] += 1
+    chosen = _choose_pair(votes)
+    if chosen is None:
+        for text in raw_reads:
+            pair = operands_from_ocr(text)
+            if pair is not None:
+                chosen = pair
+                votes[pair] += 1
+                break
+    meta: dict[str, Any] = {
+        "guesses": raw_reads[:40],
+        "votes": {f"{a}+{b}": count for (a, b), count in votes.most_common(12)},
+        "chosen_pair": chosen,
+        "chosen_sum": (chosen[0] + chosen[1]) if chosen else None,
+    }
+    return meta["chosen_sum"], meta
+
+
+def save_captcha_attempt(
+    ca_no: str,
+    attempt: int,
+    image_bytes: bytes,
+    meta: dict[str, Any],
+    *,
+    outcome: str,
+) -> Path | None:
+    try:
+        CAPTCHA_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        safe = "".join(ch for ch in ca_no if ch.isdigit()) or "unknown"
+        base = f"{safe}_{stamp}_try{attempt}_{outcome}"
+        png = CAPTCHA_DEBUG_DIR / f"{base}.png"
+        png.write_bytes(image_bytes)
+        payload = {"ca_no": ca_no, "attempt": attempt, "outcome": outcome, **meta}
+        (CAPTCHA_DEBUG_DIR / f"{base}.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return png
+    except OSError:
+        return None
+
+
+def _choose_pair(votes: Counter[tuple[int, int]]) -> tuple[int, int] | None:
+    if not votes:
+        return None
+    ranked = votes.most_common()
+    pair, count = ranked[0]
+    if count >= 2:
+        return pair
+    if len(ranked) == 1:
+        return pair
+    if ranked[0][1] > ranked[1][1]:
+        return ranked[0][0]
+    return None
+
+
+def _read_with_text(image: Image.Image, psm: int) -> tuple[str, tuple[int, int] | None]:
+    padded = _pad(image, 16)
+    config = f"--oem 3 --psm {psm} -c tessedit_char_whitelist={_WHITELIST}"
+    text = pytesseract.image_to_string(padded, config=config)
+    return text, operands_from_ocr(text)
+
+
+def _flatten_rgba(image: Image.Image) -> Image.Image:
+    if image.mode != "RGBA":
+        return image.convert("RGB")
+    flat = Image.new("RGB", image.size, (255, 255, 255))
+    flat.paste(image, mask=image.split()[3])
+    return flat
+
+
+def _pad(image: Image.Image, margin: int) -> Image.Image:
+    canvas = Image.new("L", (image.width + 2 * margin, image.height + 2 * margin), 255)
+    canvas.paste(image.convert("L"), (margin, margin))
+    return canvas
+
+
+def _otsu_threshold(gray: Image.Image) -> int:
+    hist = gray.histogram()[:256]
+    total = sum(hist)
+    if total <= 0:
+        return 140
+    sum_total = sum(index * count for index, count in enumerate(hist))
+    sum_bg = 0
+    weight_bg = 0
+    best_thresh = 128
+    best_var = -1.0
+    for thresh in range(256):
+        weight_bg += hist[thresh]
+        if weight_bg == 0:
+            continue
+        weight_fg = total - weight_bg
+        if weight_fg == 0:
+            break
+        sum_bg += thresh * hist[thresh]
+        mean_bg = sum_bg / weight_bg
+        mean_fg = (sum_total - sum_bg) / weight_fg
+        var_between = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
+        if var_between > best_var:
+            best_var = var_between
+            best_thresh = thresh
+    return best_thresh
+
+
+def _inverted_variant(image: Image.Image, scale: int) -> Image.Image:
+    gray = ImageOps.autocontrast(image.convert("L"))
+    enlarged = gray.resize((gray.width * scale, gray.height * scale), Image.Resampling.LANCZOS)
+    ink = enlarged.point(lambda pixel: 0 if pixel < 140 else 255)
+    return ImageOps.invert(ink.convert("L"))
+
+
+def _otsu_variant(image: Image.Image, scale: int) -> Image.Image:
+    gray = ImageOps.autocontrast(image.convert("L"))
+    enlarged = gray.resize((gray.width * scale, gray.height * scale), Image.Resampling.LANCZOS)
+    limit = _otsu_threshold(enlarged)
+    ink = enlarged.point(lambda pixel, limit=limit: 0 if pixel < limit else 255)
+    return _denoise(_remove_strike(ink))
+
+
+def _median_variant(image: Image.Image, scale: int) -> Image.Image:
+    gray = ImageOps.autocontrast(image.convert("L"))
+    smooth = gray.filter(ImageFilter.MedianFilter(size=3))
+    enlarged = smooth.resize((smooth.width * scale, smooth.height * scale), Image.Resampling.LANCZOS)
+    limit = _otsu_threshold(enlarged)
+    ink = enlarged.point(lambda pixel, limit=limit: 0 if pixel < limit else 255)
+    return _denoise(_remove_strike(ink))
+
+
+def _sharpen_variant(image: Image.Image, scale: int) -> Image.Image:
+    gray = ImageOps.autocontrast(image.convert("L"))
+    sharp = gray.filter(ImageFilter.SHARPEN)
+    enlarged = sharp.resize((sharp.width * scale, sharp.height * scale), Image.Resampling.LANCZOS)
+    ink = enlarged.point(lambda pixel: 0 if pixel < 145 else 255)
+    return _denoise(_remove_strike(ink))
+
+
+def _plain_gray(image: Image.Image, scale: int, threshold: int) -> Image.Image:
+    gray = ImageOps.autocontrast(image.convert("L"))
+    enlarged = gray.resize((gray.width * scale, gray.height * scale), Image.Resampling.LANCZOS)
+    return enlarged.point(lambda pixel, limit=threshold: 0 if pixel < limit else 255)
+
+
+def _gray_variant(image: Image.Image, scale: int, threshold: int) -> Image.Image:
+    gray = ImageOps.autocontrast(image.convert("L"))
+    enlarged = gray.resize((gray.width * scale, gray.height * scale), Image.Resampling.LANCZOS)
+    ink = enlarged.point(lambda pixel, limit=threshold: 0 if pixel < limit else 255)
+    return _denoise(_remove_strike(ink))
+
+
+def _green_variant(image: Image.Image, scale: int) -> Image.Image:
+    rgb = image.convert("RGB")
+    width, height = rgb.size
+    source = rgb.load()
+    mask = Image.new("L", (width, height), 255)
+    target = mask.load()
+    for y in range(height):
+        for x in range(width):
+            red, green, blue = source[x, y]
+            greenish = (
+                green + 10 >= red
+                and green + 10 >= blue
+                and max(red, green, blue) < 210
+                and (green - red) + (green - blue) >= 8
+            )
+            near_black = red < 75 and green < 100 and blue < 75
+            if greenish or near_black:
+                target[x, y] = 0
+    enlarged = mask.resize((width * scale, height * scale), Image.Resampling.NEAREST)
+    return _denoise(_remove_strike(enlarged))
+
+
+def _remove_strike(image: Image.Image) -> Image.Image:
+    width, height = image.size
+    pixels = image.load()
+    row_run = [0] * height
+    column_used = [False] * width
+    for y in range(height):
+        longest = run = 0
+        for x in range(width):
+            if pixels[x, y] < 128:
+                run += 1
+                if run > longest:
+                    longest = run
+                column_used[x] = True
+            else:
+                run = 0
+        row_run[y] = longest
+    used = [index for index, on in enumerate(column_used) if on]
+    min_run = 5 if width < 200 else 8
+    if not used or max(row_run) < min_run:
+        return image
+    text_width = used[-1] - used[0] + 1
+    ink_runs = sorted(run for run in row_run if run >= 6)
+    if not ink_runs:
+        return image
+    median = ink_runs[len(ink_runs) // 2]
+    limit = max(int(median * 2.4), int(text_width * 0.55))
+    strike_rows = [
+        y
+        for y, run in enumerate(row_run)
+        if run >= limit and height * 0.12 < y < height * 0.88
+    ]
+    if not strike_rows:
+        return image
+    top, bottom = min(strike_rows), max(strike_rows)
+    if bottom - top > max(3, height // 6):
+        peak = max(strike_rows, key=lambda y: row_run[y])
+        top = bottom = peak
+    cleaned = image.copy()
+    output = cleaned.load()
+    for y in range(top, bottom + 1):
+        for x in range(width):
+            output[x, y] = 255
+    if top > 0 and bottom + 1 < height:
+        for x in range(width):
+            if pixels[x, top - 1] < 128 and pixels[x, bottom + 1] < 128:
+                for y in range(top, bottom + 1):
+                    output[x, y] = 0
+    return cleaned
+
+
+def _denoise(image: Image.Image) -> Image.Image:
+    width, height = image.size
+    pixels = image.load()
+    cleaned = image.copy()
+    output = cleaned.load()
+    for y in range(1, height - 1):
+        for x in range(1, width - 1):
+            if pixels[x, y] >= 128:
+                continue
+            neighbours = 0
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if (dx or dy) and pixels[x + dx, y + dy] < 128:
+                        neighbours += 1
+            if neighbours < 1:
+                output[x, y] = 255
+    return cleaned

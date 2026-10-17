@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<body>
+<form name="form1" method="post" action="./paybillonline.aspx" id="form1">
+  <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="TESTVIEWSTATE" />
+  <input type="hidden" name="__VIEWSTATEGENERATOR" id="__VIEWSTATEGENERATOR" value="TESTGEN" />
+  <input type="hidden" name="__EVENTVALIDATION" id="__EVENTVALIDATION" value="TESTVALID" />
+  <input name="txtcano" type="text" id="txtcano" value="" placeholder="* CA No. /Instalment No." />
+  <input name="txtmobile" type="text" id="txtmobile" placeholder="Mobile No. for E-receipt" />
+  <input name="txtemail" type="text" id="txtemail" placeholder="* Email Id for E-receipt" />
+  <img id="Img" title="Image Verification Code" alt="" src="capt.aspx" />
+  <a href="javascript:void(0);" onclick="return ChangeImage();">Change Image</a>
+  <input name="TxtImgVer" type="text" id="TxtImgVer" value="Enter addition of two numbers" />
+  <input type="submit" name="btnpay" value="Pay Now" id="btnpay" />
+</form>
+</body>
+</html>

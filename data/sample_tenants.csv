@@ -1,0 +1,4 @@
+S.NO,NAME,ADDRESS,PH. NO,RENT,DATE,STATUS,CA.NO,BILL AMOUNT,BILL DUE,BILL STATUS,BILL CHECKED,PAID FOR,NOTES,BILL NAME,BILL NO,BILL DATE,EXACT BILL,CHECK STATE,LAST PAYMENT,LAST PAID ON
+1,Sample A,Lane 1,9811111111,10000,18TH,,60000000001,,,Unpaid,,,"Sample row. Not a real tenant.",,,,,,,
+2,Sample B,Lane 2,9822222222,8000,5TH,,60000000002,,,Paid,,,"Sample row. Not a real tenant.",,,,,,,
+3,Sample C,Lane 3,,12000,1ST,,60000000003,,,Error: Captcha could not be solved,,,"Sample row. Not a real tenant.",,,,,,,
