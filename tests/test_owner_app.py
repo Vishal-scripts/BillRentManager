@@ -191,7 +191,7 @@ class ApiTests(unittest.TestCase):
     def test_import_sample_and_export(self):
         rows = read_path(SAMPLE)
         self.assertEqual([row["ca_no"] for row in rows], ["60000000001", "60000000002", "60000000003"])
-        self.assertNotIn("SAROJ", SAMPLE.read_text(encoding="utf-8"))
+        self.assertNotIn("ASHA", SAMPLE.read_text(encoding="utf-8"))
         with SAMPLE.open("rb") as handle:
             imported = self.client.post("/api/tenants/import", files={"file": ("sample_tenants.csv", handle, "text/csv")})
         self.assertEqual(imported.status_code, 200)

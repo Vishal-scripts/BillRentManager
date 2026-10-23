@@ -40,7 +40,7 @@ Expected: a yellow **Practice data** label. Home shows fictional people (Asha, B
 | Mark the same row Unpaid | The row is no longer green |
 | Tenants search | Typing a name hides the others |
 | Add a tenant, then delete it | The row appears, then it is gone |
-| Import `data\sample_tenants.csv` | Added or updated rows. The file has CA 60000000001, 60000000002, 60000000003 and the word SAROJ is not in it |
+| Import `data\sample_tenants.csv` | Added or updated rows. The file has CA 60000000001, 60000000002, 60000000003 and the word ASHA is not in it |
 | Excel | A `.xlsx` downloads. Paid rows are green, due rows orange, overdue or error rows red |
 
 ### Refresh options in practice mode
@@ -58,7 +58,7 @@ On **Bills**:
 
 While a run is going, the live panel lists each CA as Waiting, Opening site, Solving captcha (try n of 6), Reading bill, Done, or Error. It shows the current name and CA, the time so far, and a rough time left. **Stop** ends the queue after the current CA. **Retry this** and **Retry all errors** queue the failed ones again. **Run log** and **Run history** open the lines for that run. Each note says `Practice data` and `Not read from Tata Power`. One error does not stop the others. Closing the window and starting again puts a half-finished Checking row back to Queued. Dates are shown in IST, for example `16 Oct 2026, 1:57 PM`. Empty amount lines stay hidden.
 
-`python billcheck\check_bills.py --demo` still prints the saved bill page (CA 60099990002, outstanding 0, exact bill 1310.00, bill number 010214833626). That command does not use the app queue.
+`python billcheck\check_bills.py --demo` still prints the saved bill page (CA 60099990002, outstanding 0, exact bill 1310.00, bill number 010000000001). That command does not use the app queue.
 
 ## 2. Real bills
 

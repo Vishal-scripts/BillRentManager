@@ -337,10 +337,10 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(result.status, "Paid")
         self.assertEqual(result.amount, 0.0)
         self.assertEqual(result.exact_bill, 1310.0)
-        self.assertEqual(result.bill_no, "010214833626")
+        self.assertEqual(result.bill_no, "010000000001")
         self.assertEqual(result.bill_date, "2026-10-01")
         self.assertEqual(result.due_date, "2026-10-16")
-        self.assertEqual(result.consumer_name, "Ms. SAROJ .")
+        self.assertEqual(result.consumer_name, "Ms. ASHA .")
         self.assertEqual(result.verified_ca, "60099990002")
         self.assertEqual(len(posts), 1)
         self.assertNotIn("cardnumber", {key.lower() for key in posts[0][1]})
@@ -386,7 +386,7 @@ class ClientTests(unittest.TestCase):
         <h2>BILL DETAILS</h2>
         <table>
           <tr><td>CA NO.</td><td>60099990002</td></tr>
-          <tr><td>Name :</td><td>Ms. SAROJ .</td></tr>
+          <tr><td>Name :</td><td>Ms. ASHA .</td></tr>
         </table>
         <p>Net Banking</p><img alt="BillDesk" />
         <input value="0" />

@@ -105,8 +105,8 @@ class ParserTests(unittest.TestCase):
         parsed = parse_bill_html(html, expected_ca="60099990002")
         self.assertEqual(parsed.status, "Paid")
         self.assertEqual(parsed.page_ca, "60099990002")
-        self.assertEqual(parsed.consumer_name, "Ms. SAROJ .")
-        self.assertEqual(parsed.bill_no, "010214833626")
+        self.assertEqual(parsed.consumer_name, "Ms. ASHA .")
+        self.assertEqual(parsed.bill_no, "010000000001")
         self.assertTrue(parsed.bill_no.startswith("0"))
         self.assertEqual(parsed.bill_date, "2026-10-01")
         self.assertEqual(parsed.due_date, "2026-10-16")
@@ -127,8 +127,8 @@ class ParserTests(unittest.TestCase):
         html = html.replace("Outstanding Amount :", "outstanding   amount")
         parsed = parse_bill_html(html, expected_ca="60099990002")
         self.assertEqual(parsed.status, "Paid")
-        self.assertEqual(parsed.consumer_name, "Ms. SAROJ .")
-        self.assertEqual(parsed.bill_no, "010214833626")
+        self.assertEqual(parsed.consumer_name, "Ms. ASHA .")
+        self.assertEqual(parsed.bill_no, "010000000001")
         self.assertEqual(parsed.bill_date, "2026-10-01")
         self.assertEqual(parsed.due_date, "2026-10-16")
         self.assertEqual(parsed.exact_bill, 1310.00)
@@ -141,7 +141,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.status, "Unpaid")
         self.assertEqual(parsed.amount, 1310.50)
         self.assertEqual(parsed.exact_bill, 1310.00)
-        self.assertEqual(parsed.bill_no, "010214833626")
+        self.assertEqual(parsed.bill_no, "010000000001")
 
     def test_rupee_entity_zero_is_paid(self):
         html = (FIXTURES / "result_bill_details.html").read_text(encoding="utf-8")
@@ -177,8 +177,8 @@ class ParserTests(unittest.TestCase):
         <h2>BILL DETAILS</h2>
         <table>
           <tr><td>CA NO.</td><td>60099990002</td></tr>
-          <tr><td>Name :</td><td>Ms. SAROJ .</td></tr>
-          <tr><td>Bill No./Bill Date :</td><td>010214833626 / 1-Oct-2026</td></tr>
+          <tr><td>Name :</td><td>Ms. ASHA .</td></tr>
+          <tr><td>Bill No./Bill Date :</td><td>010000000001 / 1-Oct-2026</td></tr>
           <tr><td>Due Date :</td><td>16-Oct-2026</td></tr>
           <tr><td>Exact Bill :</td><td>Rs. 1310.00</td></tr>
         </table>
