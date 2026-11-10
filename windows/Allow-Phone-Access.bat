@@ -8,6 +8,12 @@ if errorlevel 1 (
 )
 netsh advfirewall firewall delete rule name="Bill Rent Manager" >nul 2>&1
 netsh advfirewall firewall add rule name="Bill Rent Manager" dir=in action=allow protocol=TCP localport=8765-8784
+if exist "%~dp0python\python.exe" (
+  echo on> "%~dp0phone-access.on"
+) else (
+  echo on> "%~dp0..\phone-access.on"
+)
+echo Phone access file written. Restart Bill Rent Manager if it is already open.
 echo.
 echo Phone access is allowed on ports 8765 to 8784.
 echo On the phone, open the address shown on the Home page.

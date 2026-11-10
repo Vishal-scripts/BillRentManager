@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import queue
-import random
 import sys
 import threading
 import time
@@ -20,6 +19,7 @@ from billcheck.captcha import captcha_tries_from_env  # noqa: E402
 from ownerapp.alerts import sync_alerts
 from ownerapp.contacts import normalize_mobile, receipt_message, receipt_ready
 from ownerapp.db import Database, utc_now
+from ownerapp.doctor import run_checks
 from ownerapp.demo_bills import demo_fetch
 from ownerapp.messages import explain_failure
 from ownerapp.paths import data_dir
@@ -202,10 +202,17 @@ class BillService:
             try:
                 self._maybe_auto()
                 self.db.rollover(self._today())
+                if not self._busy.locked():
+                    self.db.requeue_stale_checking()
+                if not self.db.open_job_cas():
+                    self._wake.wait(1.0)
+                    self._wake.clear()
+                    continue
             except Exception as exc:
+                if self._stop.is_set():
+                    break
                 self._log("loop-error", error=str(exc))
-            if not self.db.open_job_cas():
-                self._wake.wait(1.0)
+                self._wake.wait(0.5)
                 self._wake.clear()
                 continue
             if not self._busy.acquire(blocking=False):
@@ -276,6 +283,7 @@ class BillService:
             job_captcha = {"tries": 0}
 
             def on_progress(event, job=job, index=index):
+                self.db.touch_job(job["id"])
                 phase = event.get("phase") or "opening"
                 step = phase if phase in STEP_LABEL else "opening"
                 if step == "blocked":
@@ -485,14 +493,18 @@ class BillService:
 
     def _tries(self) -> int:
         try:
-            return max(3, min(12, int(self.db.setting("captcha_tries") or "8")))
+            return max(1, min(12, int(self.db.setting("captcha_tries") or "6")))
         except ValueError:
-            return 8
+            return 6
 
     def _pause(self) -> float:
         if self.gap is not None:
             return self.gap
-        return random.uniform(3.0, 6.0)
+        try:
+            delay = float(self.db.setting("request_delay") or "3")
+        except (TypeError, ValueError):
+            delay = 3.0
+        return max(2.0, delay)
 
     def _today(self) -> date:
         value = self.today() if callable(self.today) else self.today
@@ -511,9 +523,25 @@ class BillService:
         stamp = now.date().isoformat()
         if self.db.setting("last_auto_date") == stamp:
             return
+        if not self._live_checks_ready():
+            self._log("auto-skip", day=stamp, reason="setup")
+            return
+        result = self.enqueue("all")
+        if not result.get("added"):
+            self._log("auto-skip", day=stamp, reason=result.get("error") or "nothing queued")
+            return
         self.db.set_setting("last_auto_date", stamp)
-        self.enqueue("all")
-        self._log("auto-refresh", day=stamp)
+        self._log("auto-refresh", day=stamp, added=result.get("added"))
+
+    def _live_checks_ready(self) -> bool:
+        """The same gate the Refresh button uses before a live bill run."""
+        if self.demo or self.fetch is not None:
+            return True
+        report = run_checks(self.db.path)
+        if report.get("ok"):
+            return True
+        self._log("auto-skip", reason=report.get("headline") or "not ready")
+        return False
 
     def _publish(self) -> None:
         snap = self.snapshot()

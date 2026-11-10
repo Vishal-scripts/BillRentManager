@@ -173,11 +173,11 @@ class ClientTests(unittest.TestCase):
         )
 
     def test_default_tries_follow_the_environment(self):
-        self.assertEqual(NdplClient().captcha_tries, 8)
+        self.assertEqual(NdplClient().captcha_tries, 6)
         with mock.patch.dict(os.environ, {"NDPL_CAPTCHA_TRIES": "4"}):
             self.assertEqual(captcha_tries_from_env(), 4)
         with mock.patch.dict(os.environ, {"NDPL_CAPTCHA_TRIES": "nope"}):
-            self.assertEqual(captcha_tries_from_env(), 8)
+            self.assertEqual(captcha_tries_from_env(), 6)
 
     def test_confident_sum_is_posted_and_the_bill_is_not_paid(self):
         client = self._client()
@@ -249,6 +249,33 @@ class ClientTests(unittest.TestCase):
         result = client.fetch("60099990003")
         self.assertEqual(result.status, "Unpaid")
         self.assertEqual(posts, ["13", "13"])
+
+    def test_no_dues_and_zero_outstanding_are_stored_as_paid(self):
+        client = self._client(tries=1)
+        posts = []
+
+        def get(url, timeout=None, headers=None):
+            if "Img.aspx" in url or "capt.aspx" in url:
+                return _Response(200, content=self.image)
+            return _Response(200, text=self.form)
+
+        def post(url, data, timeout=None, allow_redirects=True, headers=None):
+            posts.append(data["TxtImgVer"])
+            html = (FIXTURES / "result_nodues.html").read_text(encoding="utf-8")
+            if len(posts) > 1:
+                html = (FIXTURES / "result_paid.html").read_text(encoding="utf-8")
+            return _Response(200, text=html)
+
+        client.session.get = get
+        client.session.post = post
+        nodues = client.fetch("60099990002")
+        self.assertEqual(nodues.status, "Paid", nodues.note)
+        self.assertEqual(nodues.amount, 0.0)
+        self.assertEqual(len(posts), 1)
+        paid = client.fetch("60099990002")
+        self.assertEqual(paid.status, "Paid", paid.note)
+        self.assertEqual(paid.amount, 0.0)
+        self.assertEqual(paid.due_date, "2026-09-01")
 
     def test_block_page_is_an_error_for_that_ca_and_is_not_retried(self):
         client = self._client()

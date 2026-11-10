@@ -73,11 +73,13 @@ Activity records who marked rent, refreshed bills, or edited a tenant.
 
 ## Phone
 
-Home shows an address like `http://192.168.1.20:8765`. The phone must be on the same Wi-Fi. Double-click `Allow-Phone-Access.bat` once and press Yes.
+Phone access is off until you turn it on. In Settings, on this computer, choose **Turn phone access on**, then restart the app. Home then shows an address like `http://192.168.1.20:8765`. The phone must be on the same Wi-Fi. Double-click `Allow-Phone-Access.bat` once and press Yes so Windows allows the port.
 
 Android Chrome: menu, Add to Home screen. iPhone Safari: Share, Add to Home Screen.
 
-Away from this Wi-Fi, the phone cannot reach the computer. Alerts stay in the app. This is not WhatsApp.
+A phone on plain `http://` can open the pages and the alert list. The browser will not show system alerts on that address, and it will not install a full offline app. Restart with `--https` if you want system alerts, then accept the certificate warning on the phone. Away from this Wi-Fi, the phone cannot reach the computer. This is not WhatsApp.
+
+Setup, backup, and restore work only on the computer that runs the app. A phone cannot do those, even for an admin.
 
 ## Practice data
 

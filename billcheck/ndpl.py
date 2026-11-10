@@ -43,7 +43,7 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
-DEFAULT_CAPTCHA_TRIES = 8
+DEFAULT_CAPTCHA_TRIES = 6
 _SITE_ERROR_ATTEMPTS = 3
 _SITE_ERROR_BACKOFF = (5, 15, 30)
 _GATEWAY_MARKERS = ("billdesk", "payu", "razorpay", "ccavenue", "unipay", "sbiepay")
@@ -255,6 +255,12 @@ class NdplClient:
         except Exception as exc:
             return self._error(ca_no, f"Bill check failed: {exc}", checked)
 
+    def _captcha_dir(self) -> Path | None:
+        """Keep captcha images out of the page-debug folder and out of the source tree."""
+        if self.debug_dir is None:
+            return None
+        return Path(self.debug_dir) / "captcha"
+
     def restart(self) -> None:
         """Open a fresh session after the current one dies. Patched test methods are kept."""
         old = self.session
@@ -445,7 +451,14 @@ class NdplClient:
                 return self._error(ca_no, _TESSERACT_NOTE, checked)
             except Exception as exc:
                 last_note = f"Captcha image could not be read ({exc})"
-                save_captcha_attempt(ca_no, attempt + 1, image, {"error": str(exc)}, outcome="error")
+                save_captcha_attempt(
+                    ca_no,
+                    attempt + 1,
+                    image,
+                    {"error": str(exc)},
+                    outcome="error",
+                    directory=self._captcha_dir(),
+                )
                 self._log(
                     "captcha-try",
                     ca=ca_no,
@@ -458,7 +471,14 @@ class NdplClient:
                 continue
             if total is None:
                 last_note = "The captcha was not clear, so the number was not sent"
-                save_captcha_attempt(ca_no, attempt + 1, image, ocr_meta, outcome="skip")
+                save_captcha_attempt(
+                    ca_no,
+                    attempt + 1,
+                    image,
+                    ocr_meta,
+                    outcome="skip",
+                    directory=self._captcha_dir(),
+                )
                 self._log(
                     "captcha-try",
                     ca=ca_no,
@@ -515,6 +535,7 @@ class NdplClient:
                     image,
                     {**ocr_meta, "site": "captcha_rejected"},
                     outcome="wrong",
+                    directory=self._captcha_dir(),
                 )
                 self._log(
                     "captcha-try",
@@ -534,6 +555,7 @@ class NdplClient:
                 image,
                 {**ocr_meta, "site": "ok", "status": parsed.status},
                 outcome="ok",
+                directory=self._captcha_dir(),
             )
             self.captcha_solved += 1
             result = self._from_parse(ca_no, parsed, checked)
@@ -713,11 +735,13 @@ _TESSERACT_NOTE = (
 def _bill_result_verified(result: BillResult, expected_ca: str) -> bool:
     if result.status not in ("Paid", "Unpaid"):
         return True
-    if result.amount is None or result.exact_bill is None:
+    if result.verified_ca and result.verified_ca != expected_ca:
+        return False
+    if result.status == "Paid" and result.amount == 0:
+        return True
+    if result.amount is None or result.exact_bill in (None, ""):
         return False
     if not result.due_date or not result.bill_no:
-        return False
-    if result.verified_ca and result.verified_ca != expected_ca:
         return False
     return True
 

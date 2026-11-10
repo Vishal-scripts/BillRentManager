@@ -33,7 +33,7 @@ class NdplBrowserClient:
         mobile: str = "",
         email: str = "",
         timeout: int = 60,
-        captcha_tries: int = 8,
+        captcha_tries: int = 6,
         pause=time.sleep,
         debug_dir: Path | None = None,
         log=None,

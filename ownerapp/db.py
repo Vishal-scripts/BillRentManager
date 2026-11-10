@@ -8,20 +8,25 @@ import os
 import re
 import secrets
 import sqlite3
+import tempfile
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from ownerapp.contacts import email_ok, mobile_ok, normalize_mobile, receipt_ready
+from ownerapp.queue_logic import lock_is_stale
 from ownerapp.rent_logic import (
-    clean_phone,
+    due_date_in_month,
     initial_closed_through,
     month_key,
     months_to_close,
     normalize_ca,
     parse_due_day,
+    parse_month_key,
     parse_rent,
     rent_tone,
+    RentTone,
 )
 
 SCHEMA = """
@@ -152,6 +157,23 @@ def hash_pin(pin: str, salt: str | None = None) -> tuple[str, str]:
     return salt, digest.hex()
 
 
+def _practice_tone(item: dict, today: date, paid: bool, cycle: str, demo: bool) -> RentTone | None:
+    """Practice rows keep one due-today, one due-soon, and one overdue on any date."""
+    if not demo or paid or cycle != month_key(today):
+        return None
+    if not str(item.get("notes") or "").startswith("Practice row"):
+        return None
+    ca = item.get("ca_no") or ""
+    if ca == "60000000001":
+        return RentTone("due", today, "Due today")
+    if ca == "60000000002":
+        soon = today + timedelta(days=2)
+        return RentTone("due", soon, "Due soon")
+    if ca == "60000000003":
+        return RentTone("overdue", today - timedelta(days=1), "Overdue")
+    return None
+
+
 def pin_matches(pin: str, salt: str, digest: str) -> bool:
     _, got = hash_pin(pin, salt)
     return hmac.compare_digest(got, digest)
@@ -166,8 +188,14 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(SCHEMA)
+        self._ensure_columns()
         self._migrate_legacy_pin()
         self._conn.commit()
+
+    def _ensure_columns(self) -> None:
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(bill_jobs)")}
+        if "heartbeat_at" not in cols:
+            self._conn.execute("ALTER TABLE bill_jobs ADD COLUMN heartbeat_at TEXT NOT NULL DEFAULT ''")
 
     def close(self) -> None:
         with self._lock:
@@ -465,13 +493,14 @@ class Database:
                 "receipt_email": self._get("receipt_email", "") or "",
                 "receipt_mobile": self._get("receipt_mobile", "") or "",
                 "request_delay": self._get("request_delay", "3") or "3",
-                "captcha_tries": self._get("captcha_tries", "8") or "8",
+                "captcha_tries": self._get("captcha_tries", "6") or "6",
                 "bill_check_mode": self._get("bill_check_mode", "auto") or "auto",
                 "auto_refresh": (self._get("auto_refresh", "false") or "false") == "true",
                 "auto_weekday": int(self._get("auto_weekday", "0") or "0"),
                 "auto_time": self._get("auto_time", "09:00") or "09:00",
                 "demo": (self._get("demo", "false") or "false") == "true",
-                "has_pin": self._user_count() > 0,
+                # The sign-in file is users.env. The HTTP layer sets this from that file.
+                "has_pin": False,
                 "receipt_ready": receipt_ready(
                     self._get("receipt_email", "") or "",
                     self._get("receipt_mobile", "") or "",
@@ -506,9 +535,9 @@ class Database:
                     value = "true" if value in (True, "true", "1", 1) else "false"
                 if key == "captcha_tries":
                     try:
-                        value = str(max(1, min(8, int(value))))
+                        value = str(max(1, min(12, int(value))))
                     except (TypeError, ValueError):
-                        value = "8"
+                        value = "6"
                 if key == "request_delay":
                     try:
                         value = str(max(2, float(value)))
@@ -539,6 +568,11 @@ class Database:
                 if self._get(setting):
                     continue
                 raw = (env.get(env_key) or "").strip()
+                if setting == "captcha_tries" and raw:
+                    try:
+                        raw = str(max(1, min(12, int(raw))))
+                    except ValueError:
+                        raw = ""
                 if raw:
                     self._set(setting, raw)
             self._conn.commit()
@@ -585,7 +619,10 @@ class Database:
     def save_tenant(self, fields: dict, tenant_id: int | None = None) -> dict:
         name = str(fields.get("name") or "").strip()
         room = str(fields.get("room") or "").strip()
-        phone = clean_phone(fields.get("phone"))
+        phone_raw = fields.get("phone")
+        if str(phone_raw or "").strip() and not mobile_ok(phone_raw):
+            raise ValueError("Phone must be 10 digits.")
+        phone = normalize_mobile(phone_raw) if str(phone_raw or "").strip() else ""
         rent = parse_rent(fields.get("rent"))
         due_day = parse_due_day(fields.get("due_day"))
         ca = normalize_ca(fields.get("ca_no")) or ""
@@ -668,12 +705,28 @@ class Database:
                 row["tenant_id"]: dict(row)
                 for row in self._conn.execute("SELECT * FROM rent_entries WHERE cycle = ?", (cycle,)).fetchall()
             }
+            demo = (self._get("demo") or "") == "true"
+        year, month = parse_month_key(cycle)
         out = []
         for tenant in tenants:
             item = dict(tenant)
             entry = entries.get(item["id"])
-            paid = bool(entry and entry["status"] == "paid")
-            tone = rent_tone(today, item["due_day"], paid, cycle)
+            created = str(item.get("created_at") or "")
+            created_month = created[:7] if len(created) >= 7 and created[4] == "-" else ""
+            due = due_date_in_month(year, month, item["due_day"])
+            viewing_past = cycle < month_key(today)
+            if viewing_past and entry is None and created_month and cycle < created_month:
+                paid = False
+                tone = RentTone("none", due, "Not a tenant yet")
+            elif viewing_past and entry is None:
+                paid = False
+                tone = RentTone("none", due, "No record")
+            else:
+                paid = bool(entry and entry["status"] == "paid")
+                tone = rent_tone(today, item["due_day"], paid, cycle)
+                practice = _practice_tone(item, today, paid, cycle, demo)
+                if practice is not None:
+                    tone = practice
             item["cycle"] = cycle
             item["paid"] = paid
             item["tone"] = tone.tone
@@ -691,6 +744,13 @@ class Database:
             raise ValueError("Status must be paid or unpaid.")
         if not cycle or len(cycle) != 7:
             raise ValueError("Choose a month.")
+        if status == "paid":
+            try:
+                amount = float(amount)
+            except (TypeError, ValueError):
+                raise ValueError("Enter an amount greater than zero.") from None
+            if amount <= 0:
+                raise ValueError("Enter an amount greater than zero.")
         now = utc_now()
         with self._lock:
             tenant = self._conn.execute("SELECT id FROM tenants WHERE id = ?", (tenant_id,)).fetchone()
@@ -847,8 +907,8 @@ class Database:
             claimed = []
             for row in rows:
                 self._conn.execute(
-                    "UPDATE bill_jobs SET state='Checking', run_id=?, claimed_at=? WHERE id=?",
-                    (run_id, now, row["id"]),
+                    "UPDATE bill_jobs SET state='Checking', run_id=?, claimed_at=?, heartbeat_at=? WHERE id=?",
+                    (run_id, now, str(int(time.time() * 1000)), row["id"]),
                 )
                 self._conn.execute(
                     """
@@ -863,6 +923,41 @@ class Database:
                 claimed.append(item)
             self._conn.commit()
         return claimed
+
+    def touch_job(self, job_id: int, now_ms: int | None = None) -> None:
+        stamp = str(int(now_ms if now_ms is not None else time.time() * 1000))
+        with self._lock:
+            self._conn.execute("UPDATE bill_jobs SET heartbeat_at=? WHERE id=?", (stamp, job_id))
+            self._conn.commit()
+
+    def requeue_stale_checking(self, now_ms: int | None = None) -> int:
+        """Put Checking rows back to Queued when their heartbeat is older than four minutes."""
+        now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, ca_no, heartbeat_at FROM bill_jobs WHERE state = 'Checking'"
+            ).fetchall()
+            count = 0
+            for row in rows:
+                raw = str(row["heartbeat_at"] or "").strip()
+                try:
+                    heartbeat = int(raw) if raw else None
+                except ValueError:
+                    heartbeat = None
+                if not lock_is_stale(heartbeat, now_ms):
+                    continue
+                self._conn.execute(
+                    "UPDATE bill_jobs SET state='Queued', run_id='', claimed_at='', heartbeat_at='' WHERE id=?",
+                    (row["id"],),
+                )
+                self._conn.execute(
+                    "UPDATE bills SET check_state='Queued' WHERE ca_no=?",
+                    (row["ca_no"],),
+                )
+                count += 1
+            if count:
+                self._conn.commit()
+        return count
 
     def finish_job(self, job_id: int, state: str, note: str) -> None:
         with self._lock:
@@ -999,9 +1094,26 @@ class Database:
         return [dict(row) for row in rows]
 
     def backup_bytes(self) -> bytes:
+        """A copy of the database without the session secret.
+
+        Someone who has the file cannot forge a sign-in cookie for this computer.
+        """
         with self._lock:
             self._conn.execute("PRAGMA wal_checkpoint(FULL)")
-            return self.path.read_bytes()
+            handle = tempfile.NamedTemporaryFile(prefix="brm-backup-", suffix=".db", delete=False)
+            handle.close()
+            tmp = Path(handle.name)
+            try:
+                dest = sqlite3.connect(tmp)
+                try:
+                    self._conn.backup(dest)
+                    dest.execute("DELETE FROM settings WHERE key = ?", ("session_secret",))
+                    dest.commit()
+                finally:
+                    dest.close()
+                return tmp.read_bytes()
+            finally:
+                tmp.unlink(missing_ok=True)
 
     def restore_bytes(self, payload: bytes) -> None:
         if not payload.startswith(b"SQLite format 3"):
@@ -1022,13 +1134,19 @@ class Database:
             staged.unlink(missing_ok=True)
             raise ValueError("That backup has no tenant list.")
         with self._lock:
+            kept_secret = self._get("session_secret")
             self._conn.close()
             staged.replace(self.path)
             self._conn = sqlite3.connect(self.path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA foreign_keys = ON")
             self._conn.executescript(SCHEMA)
+            self._ensure_columns()
             self._migrate_legacy_pin()
+            if kept_secret:
+                self._set("session_secret", kept_secret)
+            elif not self._get("session_secret"):
+                self._set("session_secret", secrets.token_hex(32))
             self._conn.commit()
 
     def rent_entries_for_export(self) -> list[dict]:

@@ -11,10 +11,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-os.environ.setdefault(
-    "TESSERACT_CMD",
-    os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
-)
+if os.name == "nt":
+    os.environ.setdefault(
+        "TESSERACT_CMD",
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
+    )
 
 from billcheck.ndpl import NdplClient  # noqa: E402
 
@@ -31,7 +32,7 @@ def main() -> int:
     client = NdplClient(
         email=email,
         mobile=mobile,
-        captcha_tries=8,
+        captcha_tries=6,
         pause=time.sleep,
         debug_dir=ROOT / "data" / "debug",
     )

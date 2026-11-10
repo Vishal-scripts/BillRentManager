@@ -54,9 +54,14 @@ static int find_running(void) {
     return 0;
 }
 
-static void open_port(int port) {
-    char url[64];
-    snprintf(url, sizeof url, "http://127.0.0.1:%d", port);
+static int file_exists(const char *path) {
+    DWORD attr = GetFileAttributesA(path);
+    return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static void open_port(int port, int https) {
+    char url[80];
+    snprintf(url, sizeof url, "%s://127.0.0.1:%d", https ? "https" : "http", port);
     ShellExecuteA(NULL, "open", url, NULL, NULL, SW_SHOWNORMAL);
 }
 
@@ -81,6 +86,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     char apppath[MAX_PATH];
     char portfile[MAX_PATH];
     char cmdline[1200];
+    char flagpath[MAX_PATH];
+    char certpath[MAX_PATH];
     WSADATA wsa;
     STARTUPINFOA si;
     PROCESS_INFORMATION pi;
@@ -94,10 +101,11 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
 
     if (!GetModuleFileNameA(NULL, dir, MAX_PATH)) return 1;
     cut_filename(dir);
+    snprintf(certpath, sizeof certpath, "%s\\data\\certs\\cert.pem", dir);
     WSAStartup(MAKEWORD(2, 2), &wsa);
     running = find_running();
     if (running) {
-        open_port(running);
+        open_port(running, file_exists(certpath));
         return 0;
     }
 
@@ -114,7 +122,16 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     SetEnvironmentVariableA("PYTHONDONTWRITEBYTECODE", "1");
 
     demo = cmd && strstr(cmd, "--demo");
-    snprintf(cmdline, sizeof cmdline, "\"%s\" -m ownerapp%s", python, demo ? " --demo" : "");
+    snprintf(flagpath, sizeof flagpath, "%s\\phone-access.on", dir);
+    snprintf(
+        cmdline,
+        sizeof cmdline,
+        "\"%s\" -m ownerapp%s%s%s",
+        python,
+        demo ? " --demo" : "",
+        file_exists(flagpath) ? " --phone" : "",
+        file_exists(certpath) ? " --https" : ""
+    );
     memset(&si, 0, sizeof si);
     si.cb = sizeof si;
     if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL, dir, &si, &pi)) {
@@ -127,7 +144,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
         port = read_port_file(dir);
     }
     if (!port) port = 8765;
-    open_port(port);
+    open_port(port, file_exists(certpath));
     WaitForSingleObject(pi.hProcess, INFINITE);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);

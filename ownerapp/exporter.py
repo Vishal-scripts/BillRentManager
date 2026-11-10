@@ -64,6 +64,9 @@ def _write_sheet(
         sheet.append(values)
         fill = FILLS.get(tone) or FILLS["none"]
         for index, cell in enumerate(sheet[sheet.max_row], start=1):
+            if isinstance(cell.value, str) and cell.value[:1] in ("=", "+", "-", "@"):
+                # Keep the characters as text. Excel must not run them as a formula.
+                cell.data_type = "s"
             cell.fill = fill
             cell.alignment = Alignment(vertical="center", wrap_text=True)
             if index in money_cols and isinstance(cell.value, (int, float)):

@@ -309,6 +309,8 @@ function homeHtml() {
     <article class="alert"><strong>${esc(item.title)}</strong><span class="muted">${esc(item.body)}</span></article>
   `).join("") || `<p class="muted">No alerts yet.</p>`;
   const phone = dash.phone_url || (state.me && state.me.phone_url) || "";
+  const phoneOn = !!(state.me && state.me.phone_access);
+  const secure = window.isSecureContext;
   return `
     ${fixHtml()}
     <section class="cards">
@@ -322,9 +324,13 @@ function homeHtml() {
     </section>
     <section class="section">
       <h2>Phone on this Wi-Fi</h2>
-      <p class="phone-url"><strong>${esc(phone)}</strong></p>
-      <p class="muted">On this computer: ${esc((state.me && state.me.local_url) || "")}</p>
-      <p class="muted">Android Chrome: menu, Add to Home screen or Install app. iPhone Safari: tap Share, then Add to Home Screen. On Windows, double-click Allow-Phone-Access.bat once and press Yes so the phone can connect. Away from this Wi-Fi, the phone cannot reach this computer.</p>
+      ${phoneOn
+        ? `<p class="phone-url"><strong>${esc(phone)}</strong></p>
+           <p class="muted">On this computer: ${esc((state.me && state.me.local_url) || "")}</p>
+           <p class="muted">The phone must be on the same Wi-Fi. Android Chrome: menu, Add to Home screen. iPhone Safari: Share, then Add to Home Screen. On Windows, double-click Allow-Phone-Access.bat once if the phone cannot connect. Away from this Wi-Fi, the phone cannot reach this computer.</p>`
+        : `<p class="muted">Phone access is off. This app is open only on this computer. An admin can turn it on in Settings, then restart the app. On Windows, also double-click Allow-Phone-Access.bat once.</p>
+           <p class="muted">On this computer: ${esc((state.me && state.me.local_url) || "")}</p>`}
+      ${secure ? "" : `<p class="muted">This address is plain http, so the phone browser will not show system alerts or install a full offline app. The list below still works. To allow system alerts, restart on the computer with <strong>--https</strong>, accept the certificate warning on the phone, and open the https address.</p>`}
     </section>
     <section class="section">
       <h2>Alerts</h2>
@@ -437,7 +443,7 @@ function billsHtml() {
   const progress = state.progress || {};
   const percent = progress.percent || 0;
   const running = progress.state === "Running" || progress.state === "Queued";
-  const tries = progress.captcha_tries || 8;
+  const tries = progress.captcha_tries || 6;
   const items = progress.items || [];
   const needsContact = state.settings && !state.settings.receipt_ready && !state.demo;
   const blocked = state.ready && !state.ready.ok && !state.demo;
@@ -803,14 +809,14 @@ function settingsHtml() {
       <label>Email used for bill check<input name="receipt_email" type="email" value="${esc(s.receipt_email || "")}" required></label>
       <p class="muted">Tata Power marks Email Id for E-receipt as required. The mobile is the e-receipt number on the same form.</p>
       <label>Mobile for the e-receipt<input name="receipt_mobile" inputmode="numeric" value="${esc(s.receipt_mobile || "")}" required></label>
-      <label>Legacy delay (seconds)<input name="request_delay" value="${esc(s.request_delay || 4)}"></label>
-      <label>Captcha tries (max 8)<input name="captcha_tries" value="${esc(s.captcha_tries || 8)}"></label>
+      <label>Seconds between CA numbers<input name="request_delay" value="${esc(s.request_delay || 3)}"></label>
+      <label>Captcha tries (1 to 12)<input name="captcha_tries" value="${esc(s.captcha_tries || 6)}"></label>
       <label>Bill check mode
         <select name="bill_check_mode">
           ${["auto", "fast", "browser"].map((name) => `<option value="${name}" ${(s.bill_check_mode || "auto") === name ? "selected" : ""}>${name === "auto" ? "Auto (Fast, then Browser on failure)" : name === "fast" ? "Fast" : "Browser"}</option>`).join("")}
         </select>
       </label>
-      <p class="muted">Bill checks run one CA at a time with a random 3–6 second gap. Auto tries the fast HTTP check first, then Microsoft Edge if that fails. Browser needs Playwright and Edge installed. Nothing is paid.</p>
+      <p class="muted">Bill checks run one CA at a time. The delay above is the wait between CA numbers (at least 2 seconds). Auto tries the fast HTTP check first, then Microsoft Edge if that fails. Browser needs Playwright and Edge installed. Nothing is paid.</p>
       <label><input type="checkbox" name="auto_refresh" ${s.auto_refresh ? "checked" : ""}> Weekly auto-refresh while this app is open</label>
       <label>Weekday
         <select name="auto_weekday">
@@ -827,13 +833,19 @@ function settingsHtml() {
       <p class="muted">Auto-refresh runs only while the app window is open and the computer is on. Monday 9:00 is the default. The app never clicks Pay. Light is the default theme. System follows this computer.</p>
     </form>
     <section class="panel stack" style="padding:16px;margin-top:12px">
+      <h2>Phone on this Wi-Fi</h2>
+      <p class="muted">Off until you turn it on and restart. The app then listens for phones on this network. Anyone on the Wi-Fi who knows a username and PIN can open it. Setup, backup, and restore stay on this computer.</p>
+      <p id="phone-state">${state.me && state.me.phone_access ? "Phone access is on. Restart if you just changed it." : "Phone access is off."}</p>
+      <button class="primary" id="phone-toggle" type="button">${state.me && state.me.phone_access ? "Turn phone access off" : "Turn phone access on"}</button>
+    </section>
+    <section class="panel stack" style="padding:16px;margin-top:12px">
       <h2>People who can sign in</h2>
       <p>Accounts are not created in this app. Open <strong>users.env</strong> in Notepad, add or delete a line, save, then restart the app.</p>
       <p class="muted">${esc((state.me && state.me.users_file) || "users.env")}</p>
       <pre class="log">admin=123456
 ramesh=4821
 priya=9090:admin</pre>
-      <p class="muted">The first line is an admin. Other lines are staff unless they end with :admin. A staff member can view, refresh bills, mark rent paid, and add or edit tenants. A staff member cannot open Settings, delete a tenant, or restore a backup. At most 10 users.</p>
+      <p class="muted">The first line is an admin. Other lines are staff unless they end with :admin. Type a PIN of 4 to 8 digits. The app replaces it with a hash and does not keep the digits. Do not use 0000, 1234, or a repeated digit. A staff member can view, refresh bills, mark rent paid, and add or edit tenants. A staff member cannot open Settings, delete a tenant, or restore a backup. At most 10 users.</p>
     </section>
     <section class="panel stack" style="padding:16px;margin-top:12px">
       <h2>Activity</h2>
@@ -1168,6 +1180,18 @@ function wireSettings() {
       toast(err.message);
     }
   };
+  const phoneToggle = document.getElementById("phone-toggle");
+  if (phoneToggle) phoneToggle.onclick = async () => {
+    const enabled = !(state.me && state.me.phone_access);
+    try {
+      await api("/api/phone-access", { method: "POST", body: { enabled } });
+      state.me.phone_access = enabled;
+      toast(enabled ? "Phone access turns on after you restart the app." : "Phone access turns off after you restart the app.");
+      draw();
+    } catch (err) {
+      toast(err.message);
+    }
+  };
   document.getElementById("backup-btn").onclick = () => { window.location = "/api/backup.db"; };
   document.getElementById("restore-btn").onclick = () => document.getElementById("restore-file").click();
   document.getElementById("restore-file").onchange = async (event) => {
@@ -1359,8 +1383,16 @@ function toast(message) {
 
 function watchProgress() {
   const source = new EventSource("/api/bills/stream");
+  let primed = false;
   source.onmessage = async (event) => {
     const snap = JSON.parse(event.data);
+    if (!primed) {
+      primed = true;
+      state.progress = snap;
+      state.lastSummary = snap.summary || "";
+      if (state.view === "bills") draw();
+      return;
+    }
     const changed = JSON.stringify(snap) !== JSON.stringify(state.progress);
     state.progress = snap;
     if ((snap.state === "Done" || snap.state === "Stopped") && snap.summary && snap.summary !== state.lastSummary) {

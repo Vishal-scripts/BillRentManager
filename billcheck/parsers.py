@@ -161,14 +161,22 @@ SITE_ERROR_NOTE = "Tata Power site returned an error page"
 
 
 def bill_parse_verified(parsed: BillParse, expected_ca: str | None = None) -> bool:
-    """True when a Paid/Unpaid page has CA, amount, due date, and bill number."""
+    """True when a Paid/Unpaid page is safe to store.
+
+    A zero outstanding amount, including an older page that only says there
+    are no dues, is Paid even when the bill number is missing. An unpaid
+    page still needs the amount, the exact bill, the due date, and the bill
+    number.
+    """
     if parsed.status not in ("Paid", "Unpaid"):
+        return True
+    if expected_ca and parsed.page_ca and parsed.page_ca != expected_ca:
+        return False
+    if parsed.status == "Paid" and parsed.amount == 0:
         return True
     if parsed.amount is None or parsed.exact_bill is None:
         return False
     if not parsed.due_date or not parsed.bill_no:
-        return False
-    if expected_ca and parsed.page_ca and parsed.page_ca != expected_ca:
         return False
     return True
 
