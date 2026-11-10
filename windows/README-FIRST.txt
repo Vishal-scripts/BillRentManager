@@ -18,21 +18,29 @@ Defender removes a file, allow this folder, then start again.
 
 The first page asks for your name, a PIN (4 to 8 digits), the email
 used for the bill check, and a 10-digit mobile. Nothing is paid.
-Your username is admin. The PIN is saved in users.env.
+Your username is admin. The PIN is saved as a hash in users.env.
+Do not use 0000, 1234, or a repeated digit.
 
 PHONE ON THE SAME WI-FI
 -----------------------
+The app listens only on this computer until phone access is on.
 1. Double-click Allow-Phone-Access.bat once. Press Yes.
-   That only allows the phone through the firewall. It does not start the app.
-2. On the phone, open the address shown on the Home page.
+   That allows the port and writes phone-access.on.
+2. Restart BillRentManager.exe if it was already open.
+3. On the phone, open the address shown on the Home page.
+
+A phone on plain http can use the pages and the alert list. It will not
+show system alerts. For those, start with HTTPS (see docs/CLIENT_HANDOVER.md)
+and accept the certificate warning on the phone.
+
+Setup, backup, and restore stay on this computer. A phone cannot do them.
 
 PEOPLE WHO CAN SIGN IN
 ----------------------
 The app does not create accounts.
 
 1. Open users.env in Notepad. It is in this folder.
-2. One person per line, for example:
-   admin=123456
+2. One person per line. Type a PIN. The app replaces it with a hash:
    ramesh=4821
 3. The first line is an admin. Later lines are staff unless the line
    ends with :admin or :staff.
@@ -40,8 +48,10 @@ The app does not create accounts.
 5. Delete a line to remove that person.
 
 An admin can open Settings, take a backup, restore, and delete a tenant.
+Backup and restore must be done on this computer, not from a phone.
 A staff member can view, refresh bills, mark rent paid, and add or edit
-tenants. Five wrong PINs lock that username for 5 minutes.
+tenants. Five wrong PINs lock that username for 5 minutes, including
+after a restart.
 
 DEMO
 ----

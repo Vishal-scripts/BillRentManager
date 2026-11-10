@@ -36,5 +36,27 @@ def lan_ip() -> str:
         sock.close()
 
 
-def phone_url(port: int) -> str:
-    return f"http://{lan_ip()}:{port}"
+def phone_access_file() -> Path:
+    return home() / "phone-access.on"
+
+
+def phone_access_enabled(explicit: bool = False) -> bool:
+    """True when this process should listen for phones on the Wi-Fi."""
+    if explicit:
+        return True
+    raw = os.environ.get("PHONE_ACCESS", "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    return phone_access_file().is_file()
+
+
+def listen_host(explicit: str, phone: bool) -> str:
+    """Stay on this computer unless phone access is turned on."""
+    chosen = (explicit or "").strip()
+    if chosen:
+        return chosen
+    return "0.0.0.0" if phone else "127.0.0.1"
+
+
+def phone_url(port: int, scheme: str = "http") -> str:
+    return f"{scheme}://{lan_ip()}:{port}"

@@ -40,13 +40,15 @@ def _cell(row: list, index: int | None):
     return "" if value is None else value
 
 
-def rows_from_table(headers: list[str], table: list[list]) -> list[dict]:
+def rows_from_table(headers: list[str], table: list[list], formula_rows: set[int] | None = None) -> list[dict]:
     mapping = _header_map(headers)
     if "name" not in mapping and "ca_no" not in mapping:
         raise ValueError("The file needs a NAME column or a CA.NO column.")
     parsed = []
-    for raw in table:
-        if not any(str(cell or "").strip() for cell in raw):
+    formula_rows = formula_rows or set()
+    for offset, raw in enumerate(table):
+        formula = offset in formula_rows
+        if not formula and not any(str(cell or "").strip() for cell in raw):
             continue
         name = str(_cell(raw, mapping.get("name")) or "").strip()
         room = str(_cell(raw, mapping.get("room")) or "").strip()
@@ -69,6 +71,8 @@ def rows_from_table(headers: list[str], table: list[list]) -> list[dict]:
             issues.append("Rent must be a number.")
         if str(due_cell).strip() and due is None:
             issues.append("Due day must be from 1 to 31.")
+        if offset in formula_rows:
+            issues.append("A cell contains a formula. Type the value instead.")
         if not name and not ca and not issues:
             continue
         parsed.append(
@@ -101,14 +105,28 @@ def read_csv(payload: bytes | str) -> list[dict]:
 
 
 def read_xlsx(payload: bytes) -> list[dict]:
-    workbook = load_workbook(io.BytesIO(payload), data_only=True, read_only=True)
+    workbook = load_workbook(io.BytesIO(payload), data_only=False, read_only=False)
     sheet = workbook["Tenants"] if "Tenants" in workbook.sheetnames else workbook.active
-    table = [list(row) for row in sheet.iter_rows(values_only=True)]
+    table = []
+    formula_rows = set()
+    for row in sheet.iter_rows():
+        values = []
+        is_formula = False
+        for cell in row:
+            if getattr(cell, "data_type", None) == "f":
+                is_formula = True
+                values.append(None)
+            else:
+                values.append(cell.value)
+        if is_formula:
+            formula_rows.add(len(table))
+        table.append(values)
     workbook.close()
     if not table:
         return []
     headers = ["" if cell is None else str(cell) for cell in table[0]]
-    return rows_from_table(headers, table[1:])
+    data_flags = {index - 1 for index in formula_rows if index > 0}
+    return rows_from_table(headers, table[1:], data_flags)
 
 
 def read_upload(filename: str, payload: bytes) -> list[dict]:

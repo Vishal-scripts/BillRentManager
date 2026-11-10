@@ -31,14 +31,13 @@ if exist ".env" (
   goto firewall
 )
 echo.
-echo Choose a PIN of 4 to 8 digits. People on this Wi-Fi need it to open the app.
-set /p OWNER_PIN=OWNER_PIN: 
+echo The browser asks for your name and a PIN the first time.
+echo The PIN is stored as a hash in users.env. Do not put a PIN in this file.
 echo Owner email for the Tata Power form. This is not a payment.
 set /p RECEIPT_EMAIL=RECEIPT_EMAIL: 
-echo Owner mobile, or leave blank
+echo Owner mobile, 10 digits, or leave blank
 set /p RECEIPT_MOBILE=RECEIPT_MOBILE: 
 (
-  echo OWNER_PIN=%OWNER_PIN%
   echo PORT=8765
   echo RECEIPT_EMAIL=%RECEIPT_EMAIL%
   echo RECEIPT_MOBILE=%RECEIPT_MOBILE%

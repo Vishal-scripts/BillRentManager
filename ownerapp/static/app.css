@@ -134,7 +134,7 @@ h1, h2, p { margin: 0; }
 .actions { display: flex; gap: 6px; }
 
 .progress {
-  position: sticky; top: 8px; z-index: 4; padding: 12px; margin-bottom: 12px;
+  position: static; padding: 12px; margin-bottom: 12px;
 }
 .bar { height: 10px; background: #efe6d6; border-radius: 99px; overflow: hidden; margin: 8px 0; }
 .bar i { display: block; height: 100%; background: var(--teal); width: 0; }
@@ -163,7 +163,7 @@ h1, h2, p { margin: 0; }
 .contact-banner h2 { margin-bottom: 6px; }
 .contact-banner label, .stack label { display: grid; gap: 4px; font-size: 14px; }
 .live-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
-.queue { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 8px; }
+.queue { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 8px; max-height: 280px; overflow: auto; }
 .queue li { padding: 8px 0; border-top: 1px solid var(--line); }
 .queue b { display: block; }
 .step-error b { color: var(--red); }

@@ -11,6 +11,9 @@ __pycache__/
 *.env
 !*.env.example
 users.env
+pin.pepper
+login-lock.json
+phone-access.on
 
 # Private tenant data and local databases
 data/tenants.csv
@@ -20,6 +23,8 @@ data/_*.csv
 data/*.db
 data/*.db-*
 data/logs/
+data/captcha-debug/
+data/certs/
 *.sqlite
 *.sqlite3
 

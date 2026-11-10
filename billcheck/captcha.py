@@ -19,10 +19,14 @@ from PIL import Image, ImageFilter, ImageOps
 
 _WHITELIST = "0123456789+"
 _MAX_OPERAND = 99
-CAPTCHA_DEBUG_DIR = Path(__file__).resolve().parents[1] / "debug_samples" / "captcha"
+def captcha_debug_dir() -> Path:
+    """Captcha images go under the data folder, not the source tree."""
+    raw = os.environ.get("NARELA_HOME", "").strip().strip('"')
+    root = Path(raw) if raw else Path(__file__).resolve().parents[1]
+    return root / "data" / "captcha-debug"
 
 
-def captcha_tries_from_env(default: int = 8) -> int:
+def captcha_tries_from_env(default: int = 6) -> int:
     """How many captcha images to try for one CA (``BRM_CAPTCHA_TRIES`` or ``NDPL_CAPTCHA_TRIES``)."""
     raw = ""
     for key in ("BRM_CAPTCHA_TRIES", "NDPL_CAPTCHA_TRIES"):
@@ -35,7 +39,7 @@ def captcha_tries_from_env(default: int = 8) -> int:
         parsed = int(raw)
     except ValueError:
         parsed = default
-    return max(3, min(12, parsed))
+    return max(1, min(12, parsed))
 
 
 def captcha_pause(attempt: int = 0, *, min_s: float | None = None, max_s: float | None = None) -> None:
@@ -125,7 +129,7 @@ def ocr_addition(image_bytes: bytes) -> int | None:
 
 
 def solve_captcha(image_bytes: bytes) -> tuple[int | None, dict[str, Any]]:
-    """OCR with preprocessings × PSM 7/8/13; majority vote, then best format match."""
+    """OCR with several preprocessings. Submit only when every read agrees, at least twice."""
     configure_tesseract()
     image = _flatten_rgba(Image.open(io.BytesIO(image_bytes)))
     votes: Counter[tuple[int, int]] = Counter()
@@ -160,13 +164,6 @@ def solve_captcha(image_bytes: bytes) -> tuple[int | None, dict[str, Any]]:
             if pair is not None:
                 votes[pair] += 1
     chosen = _choose_pair(votes)
-    if chosen is None:
-        for text in raw_reads:
-            pair = operands_from_ocr(text)
-            if pair is not None:
-                chosen = pair
-                votes[pair] += 1
-                break
     meta: dict[str, Any] = {
         "guesses": raw_reads[:40],
         "votes": {f"{a}+{b}": count for (a, b), count in votes.most_common(12)},
@@ -183,16 +180,18 @@ def save_captcha_attempt(
     meta: dict[str, Any],
     *,
     outcome: str,
+    directory: Path | None = None,
 ) -> Path | None:
     try:
-        CAPTCHA_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        folder = Path(directory) if directory else captcha_debug_dir()
+        folder.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
         safe = "".join(ch for ch in ca_no if ch.isdigit()) or "unknown"
         base = f"{safe}_{stamp}_try{attempt}_{outcome}"
-        png = CAPTCHA_DEBUG_DIR / f"{base}.png"
+        png = folder / f"{base}.png"
         png.write_bytes(image_bytes)
         payload = {"ca_no": ca_no, "attempt": attempt, "outcome": outcome, **meta}
-        (CAPTCHA_DEBUG_DIR / f"{base}.json").write_text(
+        (folder / f"{base}.json").write_text(
             json.dumps(payload, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
@@ -202,16 +201,18 @@ def save_captcha_attempt(
 
 
 def _choose_pair(votes: Counter[tuple[int, int]]) -> tuple[int, int] | None:
+    """Return a pair only when it leads every other reading by at least two votes.
+
+    A single guess, a tie, or a one-vote lead such as 3 against 2 is left
+    unread so the checker refreshes the image instead of posting a sum.
+    """
     if not votes:
         return None
     ranked = votes.most_common()
     pair, count = ranked[0]
-    if count >= 2:
+    others = sum(item[1] for item in ranked[1:])
+    if count >= 2 and count >= others + 2:
         return pair
-    if len(ranked) == 1:
-        return pair
-    if ranked[0][1] > ranked[1][1]:
-        return ranked[0][0]
     return None
 
 

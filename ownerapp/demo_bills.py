@@ -76,6 +76,7 @@ def demo_fetch(ca_no: str, on_progress=None, tries: int = 6, pause: float = 0) -
 
 
 def seed_demo(db: Database, today: date) -> None:
+    db.set_setting("demo", "true")
     if db.list_tenants():
         return
     day = today.day

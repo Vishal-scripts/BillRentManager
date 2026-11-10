@@ -25,7 +25,9 @@ from ownerapp.importer import read_upload
 from ownerapp.paths import home, phone_url
 from ownerapp.rent_logic import month_key, parse_rent
 from ownerapp.service import BillService
-from ownerapp.users_file import UserDirectory
+from ownerapp.users_file import UserDirectory, pin_too_easy
+
+LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 
 STATIC = Path(__file__).resolve().parent / "static"
 
@@ -53,6 +55,7 @@ def create_app(
     log_path: Path | None = None,
     port: int = 8765,
     users_path: Path | None = None,
+    secure_cookie: bool = False,
 ) -> FastAPI:
     db = Database(db_path)
     secret = db.ensure_secret()
@@ -71,12 +74,22 @@ def create_app(
         app.state.db.close()
 
     app = FastAPI(title="Bill Rent Manager", lifespan=lifespan)
-    app.add_middleware(SessionMiddleware, secret_key=secret, same_site="lax", https_only=False, max_age=60 * 60 * 24 * 14)
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=secret,
+        same_site="lax",
+        https_only=secure_cookie,
+        max_age=60 * 60 * 24 * 14,
+    )
     app.state.db = db
     app.state.today = clock
     app.state.service = BillService(db, demo=demo, fetch=fetch, today=clock, gap=gap, log_path=log_path)
     app.state.port = port
     app.state.users = users
+    app.state.secure_cookie = secure_cookie
+    app.state.public_scheme = "https" if secure_cookie else "http"
+    users_file = Path(users_path) if users_path else home() / "users.env"
+    app.state.phone_flag = users_file.parent / "phone-access.on"
     app.state.live_bills = fetch is None and not demo
     app.state.doctor_cache = (0.0, None)
 
@@ -97,6 +110,22 @@ def create_app(
         if user["role"] != "admin":
             raise HTTPException(status_code=403, detail="Only an admin can do that.")
         return user
+
+    def client_is_local(request: Request) -> bool:
+        host = request.client.host if request.client else ""
+        return host in LOCAL_HOSTS
+
+    def require_local(request: Request) -> None:
+        """Setup, backup, and restore stay on this computer even when phones can connect."""
+        if client_is_local(request):
+            return
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Open Bill Rent Manager on the computer it runs on to do this. "
+                "A phone on the Wi-Fi cannot set up the admin, download a backup, or restore one."
+            ),
+        )
 
     def remember(request: Request, user: dict) -> None:
         request.session["ok"] = True
@@ -150,8 +179,10 @@ def create_app(
             "ok": bool(user) and not needs_setup,
             "demo": app.state.db.public_settings()["demo"],
             "needs_setup": needs_setup,
-            "phone_url": phone_url(app.state.port),
-            "local_url": f"http://127.0.0.1:{app.state.port}",
+            "phone_url": phone_url(app.state.port, app.state.public_scheme),
+            "local_url": f"{app.state.public_scheme}://127.0.0.1:{app.state.port}",
+            "phone_access": app.state.phone_flag.is_file(),
+            "https": bool(app.state.secure_cookie),
             "owner_name": app.state.db.setting("owner_name") or "",
             "username": user["username"] if user else "",
             "display_name": user["display_name"] if user else "",
@@ -165,6 +196,7 @@ def create_app(
 
     @app.post("/api/setup")
     def first_run(request: Request, body: dict):
+        require_local(request)
         if app.state.users.users:
             raise HTTPException(status_code=400, detail="An admin user is already set in users.env.")
         pin_value = str(body.get("pin") or "")
@@ -173,6 +205,11 @@ def create_app(
             raise HTTPException(status_code=400, detail="The two PINs do not match.")
         if not pin_value.isdigit() or not 4 <= len(pin_value) <= 8:
             raise HTTPException(status_code=400, detail="Use a PIN of 4 to 8 digits.")
+        if pin_too_easy(pin_value):
+            raise HTTPException(
+                status_code=400,
+                detail="That PIN is too easy. Do not use 0000, 1234, or a repeated digit.",
+            )
         name = str(body.get("owner_name") or "").strip()
         if not name:
             raise HTTPException(status_code=400, detail="Type your name.")
@@ -213,7 +250,8 @@ def create_app(
         app.state.db.rollover(today)
         sync_alerts(app.state.db, today)
         board = dashboard(app.state.db, today)
-        board["phone_url"] = phone_url(app.state.port)
+        board["phone_url"] = phone_url(app.state.port, app.state.public_scheme)
+        board["phone_access"] = app.state.phone_flag.is_file()
         board["owner_name"] = app.state.db.setting("owner_name") or ""
         return board
 
@@ -413,10 +451,18 @@ def create_app(
         today = current_day()
         cycle = body.get("cycle") or month_key(today)
         amount = body.get("amount")
+        status_name = body.get("status") or "paid"
         if amount in ("", None):
             amount = None
+        elif status_name == "unpaid":
+            amount = parse_rent(amount)
         else:
-            amount = parse_rent(amount) if body.get("status") == "unpaid" else float(amount)
+            try:
+                amount = float(amount)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Enter an amount greater than zero.") from None
+            if amount <= 0:
+                raise HTTPException(status_code=400, detail="Enter an amount greater than zero.")
         try:
             app.state.db.mark_rent(
                 int(body["tenant_id"]),
@@ -502,7 +548,10 @@ def create_app(
 
     @app.get("/api/settings")
     def get_settings(_: None = Depends(signed_in)):
-        return app.state.db.public_settings()
+        data = app.state.db.public_settings()
+        data["has_pin"] = bool(app.state.users.users)
+        data["phone_access"] = app.state.phone_flag.is_file()
+        return data
 
     @app.put("/api/settings")
     def put_settings(body: dict, user: dict = Depends(admin_only)):
@@ -514,7 +563,8 @@ def create_app(
         return saved
 
     @app.get("/api/backup.db")
-    def download_backup(_: dict = Depends(admin_only)):
+    def download_backup(request: Request, _: dict = Depends(admin_only)):
+        require_local(request)
         blob = app.state.db.backup_bytes()
         return Response(
             blob,
@@ -523,7 +573,8 @@ def create_app(
         )
 
     @app.post("/api/restore")
-    async def restore_backup(file: UploadFile = File(...), user: dict = Depends(admin_only)):
+    async def restore_backup(request: Request, file: UploadFile = File(...), user: dict = Depends(admin_only)):
+        require_local(request)
         payload = await file.read()
         try:
             app.state.db.restore_bytes(payload)
@@ -531,6 +582,22 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         app.state.db.log_activity(user["username"], "restore backup", file.filename or "")
         return {"ok": True}
+
+    @app.post("/api/phone-access")
+    def set_phone_access(request: Request, body: dict, user: dict = Depends(admin_only)):
+        require_local(request)
+        enabled = body.get("enabled") in (True, "true", "1", 1, "on")
+        flag = app.state.phone_flag
+        if enabled:
+            flag.write_text("on\n", encoding="ascii")
+        elif flag.is_file():
+            flag.unlink()
+        app.state.db.log_activity(user["username"], "phone access", "on" if flag.is_file() else "off")
+        return {
+            "enabled": flag.is_file(),
+            "restart": True,
+            "phone_url": phone_url(app.state.port, app.state.public_scheme),
+        }
 
     @app.get("/")
     def index():

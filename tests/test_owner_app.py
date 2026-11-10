@@ -262,7 +262,10 @@ class ApiTests(unittest.TestCase):
             self.assertTrue(saved.json()["ok"])
             self.assertFalse(saved.json()["needs_setup"])
             self.assertEqual(client.get("/api/tenants").status_code, 200)
-            self.assertIn("admin=1357", users.read_text(encoding="utf-8"))
+            saved_users = users.read_text(encoding="utf-8")
+            self.assertNotIn("1357", saved_users)
+            self.assertIn("pbkdf2$", saved_users)
+            self.assertTrue((users.parent / "pin.pepper").is_file())
             self.assertIn("Username", client.get("/static/app.js").text)
             again = client.post("/api/setup", json={"pin": "1357", "owner_name": "Vishal"})
             self.assertEqual(again.status_code, 400)
@@ -557,6 +560,185 @@ class BundledTesseractTests(unittest.TestCase):
                 else:
                     os.environ["TESSDATA_PREFIX"] = old_prefix
                 configure_tesseract()
+
+
+class AuditFixTests(unittest.TestCase):
+    def test_listen_host_stays_local_until_phone_access(self):
+        from ownerapp.paths import listen_host
+
+        self.assertEqual(listen_host("", False), "127.0.0.1")
+        self.assertEqual(listen_host("", True), "0.0.0.0")
+        self.assertEqual(listen_host("0.0.0.0", False), "0.0.0.0")
+
+    def test_easy_pin_is_refused_and_the_hash_is_not_the_pin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_app(Path(tmp) / "easy.db", pin=None, fetch=fast_fetch, today=lambda: TODAY, gap=0, users_path=Path(tmp) / "users.env")
+            with TestClient(app) as client:
+                refused = client.post(
+                    "/api/setup",
+                    json={"owner_name": "Vishal", "pin": "0000", "confirm": "0000", "email": "owner@example.com", "mobile": "9811111111"},
+                )
+                self.assertEqual(refused.status_code, 400)
+                self.assertIn("too easy", refused.json()["detail"].lower())
+
+    def test_setup_backup_and_restore_are_local_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            users = Path(tmp) / "users.env"
+            app = create_app(Path(tmp) / "lan.db", pin="2468", fetch=fast_fetch, today=lambda: TODAY, gap=0, users_path=users)
+            import asyncio
+            import httpx
+
+            async def remote_calls():
+                transport = httpx.ASGITransport(app=app, client=("192.168.1.20", 50000))
+                async with httpx.AsyncClient(transport=transport, base_url="http://test") as remote:
+                    signed = await remote.post("/api/login", json={"username": "admin", "pin": "2468"})
+                    tenants = await remote.get("/api/tenants")
+                    backup = await remote.get("/api/backup.db")
+                    phone = await remote.post("/api/phone-access", json={"enabled": True})
+                    return signed, tenants, backup, phone
+
+            signed, tenants, backup, phone = asyncio.run(remote_calls())
+            self.assertEqual(signed.status_code, 200, signed.text)
+            self.assertEqual(tenants.status_code, 200)
+            self.assertEqual(backup.status_code, 403)
+            self.assertEqual(phone.status_code, 403)
+            with TestClient(app) as local:
+                local.post("/api/login", json={"username": "admin", "pin": "2468"})
+                turned = local.post("/api/phone-access", json={"enabled": True})
+                self.assertEqual(turned.status_code, 200, turned.text)
+                self.assertTrue(turned.json()["enabled"])
+                self.assertTrue((users.parent / "phone-access.on").is_file())
+                backup = local.get("/api/backup.db")
+                self.assertEqual(backup.status_code, 200)
+                import sqlite3
+
+                probe = sqlite3.connect(":memory:")
+                # The backup is a file image. Open it from a temp path.
+                blob = Path(tmp) / "backup.db"
+                blob.write_bytes(backup.content)
+                probe = sqlite3.connect(blob)
+                keys = [row[0] for row in probe.execute("SELECT key FROM settings")]
+                probe.close()
+                self.assertNotIn("session_secret", keys)
+                settings = local.get("/api/settings").json()
+                self.assertTrue(settings["has_pin"])
+                self.assertEqual(settings["captcha_tries"], "6")
+
+    def test_lockout_survives_a_new_process(self):
+        from ownerapp.users_file import UserDirectory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "users.env"
+            path.write_text("admin=2468\n", encoding="utf-8")
+            first = UserDirectory(path)
+            for _ in range(5):
+                user, status = first.authenticate("admin", "9999")
+            self.assertEqual(status, "locked")
+            second = UserDirectory(path)
+            user, status = second.authenticate("admin", "2468")
+            self.assertEqual(status, "locked")
+            self.assertIsNone(user)
+
+    def test_phone_amount_past_month_delay_and_heartbeat(self):
+        from ownerapp.demo_bills import seed_demo
+        from ownerapp.rent_logic import month_key
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "rules.db")
+            short = None
+            try:
+                db.save_tenant({"name": "Short", "phone": "12345", "active": True})
+            except ValueError as exc:
+                short = str(exc)
+            self.assertEqual(short, "Phone must be 10 digits.")
+            tenant = db.save_tenant({"name": "New", "phone": "9811111111", "rent": 500, "due_day": 9, "active": True})
+            with self.assertRaises(ValueError):
+                db.mark_rent(tenant["id"], "2026-11", "paid", -5, "2026-11-09", "Cash", "")
+            with self.assertRaises(ValueError):
+                db.mark_rent(tenant["id"], "2026-11", "paid", 0, "2026-11-09", "Cash", "")
+            october = db.rent_rows("2026-10", date(2026, 11, 9))
+            self.assertEqual(october[0]["tone_label"], "Not a tenant yet")
+            saved = db.update_settings({"captcha_tries": 12, "request_delay": 1, "receipt_email": "owner@example.com", "receipt_mobile": "9811111111"})
+            self.assertEqual(saved["captcha_tries"], "12")
+            db.save_tenant({"name": "New", "phone": "9811111111", "rent": 500, "due_day": 9, "ca_no": "60000000021", "active": True}, tenant["id"])
+            service = BillService(db, fetch=None, gap=None, today=lambda: date(2026, 11, 9))
+            self.assertEqual(service._pause(), 2.0)
+            db.set_setting("request_delay", "9")
+            self.assertEqual(service._pause(), 9.0)
+            db.set_setting("auto_refresh", "true")
+            db.set_setting("auto_weekday", str(date.today().weekday()))
+            db.set_setting("auto_time", "00:00")
+            db.set_setting("receipt_email", "")
+            service._maybe_auto()
+            self.assertIsNone(db.setting("last_auto_date"))
+            self.assertEqual(db.open_job_cas(), [])
+            db.set_setting("receipt_email", "owner@example.com")
+            from unittest import mock
+            with mock.patch("ownerapp.service.run_checks", return_value={"ok": False, "headline": "Tesseract was not found."}):
+                service._maybe_auto()
+            self.assertIsNone(db.setting("last_auto_date"))
+            self.assertEqual(db.open_job_cas(), [])
+            db.enqueue_jobs([{"ca_no": "60000000001", "name": "A"}], "all")
+            claimed = db.claim_queued("run")
+            db.touch_job(claimed[0]["id"], now_ms=1_000)
+            self.assertEqual(db.requeue_stale_checking(now_ms=1_000 + 4 * 60 * 1000), 1)
+            self.assertEqual(db.open_job_cas(), ["60000000001"])
+            for day in (date(2026, 11, 1), date(2026, 10, 31), date(2026, 10, 16)):
+                folder = Path(tmp) / day.isoformat()
+                folder.mkdir()
+                demo = Database(folder / "demo.db")
+                seed_demo(demo, day)
+                tones = {row["ca_no"]: row["tone_label"] for row in demo.rent_rows(month_key(day), day)}
+                self.assertEqual(tones["60000000001"], "Due today", day)
+                self.assertEqual(tones["60000000002"], "Due soon", day)
+                self.assertEqual(tones["60000000003"], "Overdue", day)
+                demo.close()
+            db.close()
+
+    def test_excel_formula_is_text_on_export_and_rejected_on_import(self):
+        from io import BytesIO
+        from openpyxl import Workbook, load_workbook
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_app(
+                Path(tmp) / "xl.db",
+                pin="2468",
+                demo=True,
+                fetch=fast_fetch,
+                today=lambda: TODAY,
+                gap=0,
+                users_path=Path(tmp) / "users.env",
+            )
+            with TestClient(app) as client:
+                client.post("/api/login", json={"username": "admin", "pin": "2468"})
+                made = client.post("/api/tenants", json={"name": "=2+2", "phone": "9811111111", "rent": 100, "due_day": 16, "active": True})
+                self.assertEqual(made.status_code, 200, made.text)
+                exported = client.get("/api/export.xlsx")
+                book = load_workbook(BytesIO(exported.content))
+                found = None
+                for row in book["Tenants"].iter_rows(min_row=2, max_col=1):
+                    if row[0].value == "=2+2":
+                        found = row[0]
+                self.assertIsNotNone(found)
+                self.assertEqual(found.data_type, "s")
+                formula = Workbook()
+                sheet = formula.active
+                sheet.title = "Tenants"
+                sheet.append(["Name", "Phone", "CA number"])
+                sheet["A2"] = '=1+1'
+                sheet["B2"] = "9811111111"
+                sheet["C2"] = "60000000088"
+                payload = BytesIO()
+                formula.save(payload)
+                imported = client.post(
+                    "/api/tenants/import",
+                    files={"file": ("bad.xlsx", payload.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+                )
+                self.assertEqual(imported.status_code, 200, imported.text)
+                self.assertEqual(imported.json()["rejected"], 1)
+                self.assertTrue(any("formula" in issue.lower() for issue in imported.json()["report"][0]["issues"]))
+                names = [row["name"] for row in client.get("/api/tenants").json()["tenants"]]
+                self.assertNotIn("2", names)
 
 
 if __name__ == "__main__":

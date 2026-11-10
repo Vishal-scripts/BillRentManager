@@ -4,7 +4,7 @@ Bill Rent Manager keeps tenants, monthly rent, and Tata Power-DDL electricity bi
 
 It does not use a Google Sheet, WhatsApp, Telegram, or SMS. It does not pay a bill. The only network call that leaves the house is the electricity check to Tata Power, and only from this PC.
 
-The day-to-day guide is [docs/OWNER_GUIDE.md](docs/OWNER_GUIDE.md). A test checklist is [docs/TEST_GUIDE.md](docs/TEST_GUIDE.md). How the captcha and the bill page are read is [docs/BILL_CHECK.md](docs/BILL_CHECK.md).
+The day-to-day guide is [docs/OWNER_GUIDE.md](docs/OWNER_GUIDE.md). A handover for the client is [docs/CLIENT_HANDOVER.md](docs/CLIENT_HANDOVER.md). A test checklist is [docs/TEST_GUIDE.md](docs/TEST_GUIDE.md). How the captcha and the bill page are read is [docs/BILL_CHECK.md](docs/BILL_CHECK.md).
 
 ## Features
 
@@ -51,6 +51,8 @@ python3 -m ownerapp
 ```
 
 Open `http://127.0.0.1:8765`. Leave the terminal open. Close it to stop the app.
+
+By default the app listens only on this computer. Phone access is off until you turn it on in Settings (or create a `phone-access.on` file next to `users.env`) and start again with the same command. `python3 -m ownerapp --phone` does that for one run. `python3 -m ownerapp --https` serves HTTPS with a certificate in `data/certs/` so a phone browser can show system alerts. On plain `http://` to a LAN address, the phone can still open the app, but the browser will not show system alerts.
 
 ### Windows
 
