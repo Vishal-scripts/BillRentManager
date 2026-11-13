@@ -81,6 +81,20 @@ def _month_label(cycle: str) -> str:
     return f"{names[month - 1]} {year}"
 
 
+def clean_alert_text(text: str) -> str:
+    """Keep stored alert text free of the Unicode replacement character.
+
+    An em dash is byte 0x97 in Windows-1252. When those bytes are read as UTF-8
+    they become U+FFFD, which is what landed in ``alerts.body`` as
+    ``SATYA PARKASH \\ufffd due soon``. ASCII punctuation cannot take that path.
+    """
+    cleaned = str(text or "")
+    cleaned = cleaned.replace("NarelaRentApp.exe", "BillRentManager.exe")
+    for bad in ("\ufffd", "\u2014", "\u2013", "\u2212"):
+        cleaned = cleaned.replace(bad, "-")
+    return cleaned
+
+
 def sync_alerts(db: Database, today: date) -> int:
     """Store a new alert once per tenant per month. Returns how many were added."""
     added = 0
@@ -89,7 +103,9 @@ def sync_alerts(db: Database, today: date) -> int:
     for row in db.rent_rows(cycle, today):
         if row["tone"] == "due":
             title = "Rent due"
-            body = f"{row['name'] or 'Tenant'} — {row['tone_label'].lower()} ({row['due_date']})."
+            body = clean_alert_text(
+                f"{row['name'] or 'Tenant'} - {row['tone_label'].lower()} ({row['due_date']})."
+            )
             key = f"rent-due:{row['id']}:{cycle}"
             if db.add_alert("rent", title, body, key):
                 added += 1

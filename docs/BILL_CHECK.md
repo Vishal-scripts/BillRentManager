@@ -80,7 +80,7 @@ Weekly is enough. Electricity bills do not change every day. Settings can queue 
 ## Install on Windows
 
 1. Install Python 3.11 or 3.12 from [python.org](https://www.python.org/downloads/windows/). Tick **Add python.exe to PATH**.
-2. Install Tesseract: `winget install UB-Mannheim.TesseractOCR`. Close and reopen the terminal so `tesseract` is on the PATH. The UB Mannheim build is free and installs to `C:\Program Files\Tesseract-OCR\tesseract.exe`. If `tesseract` is still not found, set this in `billcheck\.env`:
+2. Install Tesseract: `winget install UB-Mannheim.TesseractOCR`. Close and reopen the terminal so `tesseract` is on the PATH. The UB Mannheim build is free. A machine-wide install is `C:\Program Files\Tesseract-OCR\tesseract.exe`. A per-user winget install is `%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe`. The app checks both, and Program Files (x86). If `tesseract` is still not found, set this in `billcheck\.env`:
 
 ```text
 TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
@@ -92,7 +92,7 @@ TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
 
 ## Login task
 
-Setup can register task `NarelaRentApp`, or run `ownerapp\Install-Login-Task.bat`. It starts `Start-App.bat` at logon. If `schtasks` fails, double-click `Start-App.bat` yourself. The PC must be on. The weekly bill refresh is a switch in **Settings**, not a second scheduled scrape.
+Setup can register task `BillRentManager`, or run `ownerapp\Install-Login-Task.bat`. It starts `Start-App.bat` at logon. If `schtasks` fails, double-click `Start-App.bat` yourself. The PC must be on. The weekly bill refresh is a switch in **Settings**, not a second scheduled scrape.
 
 ## If a CA fails
 

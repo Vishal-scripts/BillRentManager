@@ -727,7 +727,7 @@ _BLOCKED_MESSAGE = (
 
 _TESSERACT_NOTE = (
     "Tesseract is not installed, so the captcha image cannot be read. "
-    "The portable app looks for tesseract\\tesseract.exe next to NarelaRentApp.exe. "
+    "The portable app looks for tesseract\\tesseract.exe next to BillRentManager.exe. "
     "Set TESSERACT_CMD if it lives somewhere else."
 )
 

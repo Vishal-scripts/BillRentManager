@@ -561,6 +561,194 @@ class BundledTesseractTests(unittest.TestCase):
                     os.environ["TESSDATA_PREFIX"] = old_prefix
                 configure_tesseract()
 
+    def _restore_tesseract_env(self, saved: dict) -> None:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        configure_tesseract()
+
+    def test_per_user_localappdata_tesseract_is_chosen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "Programs" / "Tesseract-OCR" / "tesseract.exe"
+            exe.parent.mkdir(parents=True)
+            exe.write_bytes(b"")
+            saved = {
+                "TESSERACT_CMD": os.environ.get("TESSERACT_CMD"),
+                "NARELA_HOME": os.environ.get("NARELA_HOME"),
+                "LOCALAPPDATA": os.environ.get("LOCALAPPDATA"),
+                "TESSDATA_PREFIX": os.environ.get("TESSDATA_PREFIX"),
+            }
+            os.environ.pop("TESSERACT_CMD", None)
+            os.environ.pop("NARELA_HOME", None)
+            os.environ.pop("TESSDATA_PREFIX", None)
+            os.environ["LOCALAPPDATA"] = tmp
+            try:
+                chosen = configure_tesseract()
+                self.assertEqual(Path(chosen), exe)
+            finally:
+                self._restore_tesseract_env(saved)
+
+    def test_userprofile_fallback_finds_the_per_user_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "AppData" / "Local" / "Programs" / "Tesseract-OCR" / "tesseract.exe"
+            exe.parent.mkdir(parents=True)
+            exe.write_bytes(b"")
+            saved = {
+                "TESSERACT_CMD": os.environ.get("TESSERACT_CMD"),
+                "NARELA_HOME": os.environ.get("NARELA_HOME"),
+                "LOCALAPPDATA": os.environ.get("LOCALAPPDATA"),
+                "USERPROFILE": os.environ.get("USERPROFILE"),
+                "TESSDATA_PREFIX": os.environ.get("TESSDATA_PREFIX"),
+            }
+            os.environ.pop("TESSERACT_CMD", None)
+            os.environ.pop("NARELA_HOME", None)
+            os.environ.pop("LOCALAPPDATA", None)
+            os.environ.pop("TESSDATA_PREFIX", None)
+            os.environ["USERPROFILE"] = tmp
+            try:
+                chosen = configure_tesseract()
+                self.assertEqual(Path(chosen), exe)
+            finally:
+                self._restore_tesseract_env(saved)
+
+    def test_portable_copy_still_wins_over_localappdata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundled = root / "app" / "tesseract" / "tesseract.exe"
+            per_user = root / "local" / "Programs" / "Tesseract-OCR" / "tesseract.exe"
+            bundled.parent.mkdir(parents=True)
+            per_user.parent.mkdir(parents=True)
+            bundled.write_bytes(b"")
+            per_user.write_bytes(b"")
+            saved = {
+                "TESSERACT_CMD": os.environ.get("TESSERACT_CMD"),
+                "NARELA_HOME": os.environ.get("NARELA_HOME"),
+                "LOCALAPPDATA": os.environ.get("LOCALAPPDATA"),
+                "TESSDATA_PREFIX": os.environ.get("TESSDATA_PREFIX"),
+            }
+            os.environ.pop("TESSERACT_CMD", None)
+            os.environ.pop("TESSDATA_PREFIX", None)
+            os.environ["NARELA_HOME"] = str(root / "app")
+            os.environ["LOCALAPPDATA"] = str(root / "local")
+            try:
+                chosen = configure_tesseract()
+                self.assertEqual(Path(chosen), bundled)
+            finally:
+                self._restore_tesseract_env(saved)
+
+    def test_windows_launchers_check_the_per_user_folder(self):
+        needle = r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"
+        start = (ROOT / "ownerapp" / "Start.bat").read_text(encoding="utf-8")
+        setup = (ROOT / "ownerapp" / "Setup.bat").read_text(encoding="utf-8")
+        self.assertGreaterEqual(start.count(needle), 2)
+        self.assertIn(needle, setup)
+        live = (ROOT / "scripts" / "live_bill_check.py").read_text(encoding="utf-8")
+        self.assertIn(needle, live)
+
+
+class AlertTextTests(unittest.TestCase):
+    def test_missing_tesseract_note_names_bill_rent_manager(self):
+        from billcheck.ndpl import _TESSERACT_NOTE
+
+        self.assertIn("tesseract\\tesseract.exe next to BillRentManager.exe", _TESSERACT_NOTE)
+        self.assertNotIn("NarelaRentApp", _TESSERACT_NOTE)
+        task = (ROOT / "ownerapp" / "Install-Login-Task.bat").read_text(encoding="utf-8")
+        self.assertIn('set "TASK=BillRentManager"', task)
+        self.assertIn('schtasks /Delete /TN "NarelaRentApp"', task)
+
+    def test_rent_due_soon_alert_uses_an_ascii_hyphen(self):
+        from ownerapp.alerts import sync_alerts
+        from ownerapp.notifications import build_notifications
+
+        today = date(2026, 11, 13)
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "alerts.db")
+            db.save_tenant(
+                {
+                    "name": "SATYA PARKASH",
+                    "rent": 1000,
+                    "due_day": 15,
+                    "ca_no": "60099990011",
+                    "active": True,
+                }
+            )
+            db.save_tenant(
+                {
+                    "name": "Asha",
+                    "rent": 800,
+                    "due_day": 10,
+                    "ca_no": "60099990012",
+                    "active": True,
+                }
+            )
+            self.assertEqual(sync_alerts(db, today), 2)
+            bodies = [row["body"] for row in db.list_alerts()]
+            self.assertIn("SATYA PARKASH - due soon (2026-11-15).", bodies)
+            self.assertTrue(all("\ufffd" not in body and "\u2014" not in body for body in bodies))
+            notes = {item["name"]: item["body"] for item in build_notifications(db, today)}
+            self.assertEqual(notes["SATYA PARKASH"], "SATYA PARKASH - due in 2 day(s).")
+            self.assertEqual(notes["Asha"], "Asha - unpaid for this month.")
+            self.assertTrue(all("\ufffd" not in body and "\u2014" not in body for body in notes.values()))
+            db.close()
+
+    def test_stored_replacement_character_and_old_exe_name_are_cleaned(self):
+        import sqlite3
+
+        from ownerapp.alerts import clean_alert_text
+
+        self.assertEqual(
+            clean_alert_text("SATYA PARKASH \ufffd due soon (2026-11-15)."),
+            "SATYA PARKASH - due soon (2026-11-15).",
+        )
+        self.assertEqual(
+            clean_alert_text("next to NarelaRentApp.exe"),
+            "next to BillRentManager.exe",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "owner.db"
+            db = Database(path)
+            db.close()
+            raw = sqlite3.connect(path)
+            raw.execute(
+                "INSERT INTO alerts(kind, title, body, created_at, dedupe_key) VALUES (?, ?, ?, ?, ?)",
+                ("rent", "Rent due", "SATYA PARKASH \ufffd due soon (2026-11-15).", "t", "legacy-ufffd"),
+            )
+            raw.execute(
+                "INSERT INTO alerts(kind, title, body, created_at, dedupe_key) VALUES (?, ?, ?, ?, ?)",
+                (
+                    "bill",
+                    "Bill check error",
+                    "The portable app looks for tesseract\\tesseract.exe next to NarelaRentApp.exe.",
+                    "t",
+                    "legacy-exe",
+                ),
+            )
+            dash = "SATYA PARKASH \x97 due soon (2026-11-15).".encode("latin-1")
+            raw.execute(
+                """
+                INSERT INTO alerts(kind, title, body, created_at, dedupe_key)
+                VALUES ('rent', 'Rent due', CAST(? AS TEXT), 't', 'legacy-cp1252')
+                """,
+                (dash,),
+            )
+            raw.commit()
+            raw.close()
+            reopened = Database(path)
+            by_key = {row["dedupe_key"]: row["body"] for row in reopened.list_alerts()}
+            self.assertEqual(by_key["legacy-ufffd"], "SATYA PARKASH - due soon (2026-11-15).")
+            self.assertEqual(
+                by_key["legacy-exe"],
+                "The portable app looks for tesseract\\tesseract.exe next to BillRentManager.exe.",
+            )
+            self.assertEqual(by_key["legacy-cp1252"], "SATYA PARKASH - due soon (2026-11-15).")
+            self.assertTrue(reopened.add_alert("rent", "Rent due", "A \u2014 due soon (2026-11-15).", "fresh"))
+            fresh = next(row["body"] for row in reopened.list_alerts() if row["dedupe_key"] == "fresh")
+            self.assertEqual(fresh, "A - due soon (2026-11-15).")
+            self.assertNotIn("\ufffd", fresh)
+            reopened.close()
+
 
 class AuditFixTests(unittest.TestCase):
     def test_listen_host_stays_local_until_phone_access(self):

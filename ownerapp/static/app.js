@@ -380,7 +380,7 @@ function importReportHtml() {
     <section class="section panel" style="padding:12px">
       <h2>Import report</h2>
       <p class="muted">Added ${state.importReport.added}, updated ${state.importReport.updated}, skipped ${state.importReport.skipped || 0}, rejected ${state.importReport.rejected || 0}.</p>
-      ${rows.map((row) => `<p>${esc(row.action)}: ${esc(row.name)} ${row.issues && row.issues.length ? "— " + esc(row.issues.join(" ")) : ""}</p>`).join("")}
+      ${rows.map((row) => `<p>${esc(row.action)}: ${esc(row.name)} ${row.issues && row.issues.length ? "- " + esc(row.issues.join(" ")) : ""}</p>`).join("")}
       <div class="tools">
         ${state.importReport.preview ? `<button class="primary" id="import-commit" type="button">Save these rows</button>` : ""}
         <label>Duplicates <select id="dup-mode">

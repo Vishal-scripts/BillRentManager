@@ -62,17 +62,35 @@ def _bundled_tesseract_candidates() -> list[str]:
     return found
 
 
-def configure_tesseract() -> str | None:
-    configured = os.environ.get("TESSERACT_CMD", "").strip().strip('"')
-    candidates = [configured] if configured else []
-    candidates.extend(_bundled_tesseract_candidates())
+def _windows_tesseract_candidates() -> list[str]:
+    """UB Mannheim install folders. Winget per-user uses LocalAppData, not Program Files.
+
+    The per-user folder is added whenever ``LOCALAPPDATA`` or ``USERPROFILE`` is
+    set, so discovery does not depend on flipping ``os.name``.
+    """
+    found = []
     if os.name == "nt":
-        candidates.extend(
+        found.extend(
             (
                 r"C:\Program Files\Tesseract-OCR\tesseract.exe",
                 r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
             )
         )
+    local = os.environ.get("LOCALAPPDATA", "").strip().strip('"')
+    if not local:
+        profile = os.environ.get("USERPROFILE", "").strip().strip('"')
+        if profile:
+            local = os.path.join(profile, "AppData", "Local")
+    if local:
+        found.append(os.path.join(local, "Programs", "Tesseract-OCR", "tesseract.exe"))
+    return found
+
+
+def configure_tesseract() -> str | None:
+    configured = os.environ.get("TESSERACT_CMD", "").strip().strip('"')
+    candidates = [configured] if configured else []
+    candidates.extend(_bundled_tesseract_candidates())
+    candidates.extend(_windows_tesseract_candidates())
     which = shutil.which("tesseract")
     if which:
         candidates.append(which)
