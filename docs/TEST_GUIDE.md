@@ -5,7 +5,7 @@ Use this on the owner’s computer. Nothing in the practice steps pays a bill or
 ## 0. Run from source on Windows
 
 1. Install Python 3.11 or 3.12 from python.org. Tick **Add python.exe to PATH**.
-2. Install Tesseract: `winget install UB-Mannheim.TesseractOCR`. Close and reopen the window so `tesseract` is found.
+2. Install Tesseract: `winget install UB-Mannheim.TesseractOCR`. Close and reopen the window so `tesseract` is found. A per-user install at `%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe` is found even when it is not on PATH.
 3. Double-click `ownerapp\Start.bat`. Leave the black window open. It creates `.venv` and installs the libraries. If Tesseract is missing, the window prints the winget command.
 4. Open `http://127.0.0.1:8765`. The first page asks for a PIN (4 to 8 digits), your name, the email used for the bill check, and a 10-digit mobile. Tata Power’s form marks the email as required and also has a mobile field for the e-receipt. A bad email or a short mobile is refused. Nothing is paid.
 5. On the phone, same Wi-Fi, open the address on the Home page. Android Chrome: menu, Add to Home screen. iPhone Safari: Share, Add to Home Screen. If the phone cannot connect, double-click `Allow-Phone-Access.bat` once and press Yes.

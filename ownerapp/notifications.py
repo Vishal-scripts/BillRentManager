@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from ownerapp.alerts import clean_alert_text
 from ownerapp.db import Database
 from ownerapp.rent_logic import month_key
 
@@ -93,7 +94,7 @@ def build_notifications(db: Database, today: date) -> list[dict]:
                     "kind": "rent",
                     "category": "rent_overdue",
                     "title": "Rent overdue",
-                    "body": f"{name} — unpaid for this month.",
+                    "body": clean_alert_text(f"{name} - unpaid for this month."),
                     "urgency": _urgency("rent_overdue", days),
                 }
             )
@@ -106,7 +107,7 @@ def build_notifications(db: Database, today: date) -> list[dict]:
                     "kind": "rent",
                     "category": "rent_due_today",
                     "title": "Rent due today",
-                    "body": f"{name} — due today.",
+                    "body": clean_alert_text(f"{name} - due today."),
                     "urgency": _urgency("rent_due_today", 0),
                 }
             )
@@ -119,7 +120,7 @@ def build_notifications(db: Database, today: date) -> list[dict]:
                     "kind": "rent",
                     "category": "rent_due_soon",
                     "title": "Rent due in 3 days",
-                    "body": f"{name} — due in {days} day(s).",
+                    "body": clean_alert_text(f"{name} - due in {days} day(s)."),
                     "urgency": _urgency("rent_due_soon", days),
                 }
             )
@@ -155,7 +156,7 @@ def build_notifications(db: Database, today: date) -> list[dict]:
                     "kind": "electricity",
                     "category": "bill_error",
                     "title": "Bill check error",
-                    "body": bill.get("note") or bill.get("status") or "Error",
+                    "body": clean_alert_text(bill.get("note") or bill.get("status") or "Error"),
                     "urgency": _urgency("bill_error", days),
                 }
             )
@@ -168,7 +169,7 @@ def build_notifications(db: Database, today: date) -> list[dict]:
                     "kind": "electricity",
                     "category": "bill_overdue",
                     "title": "Electricity bill overdue",
-                    "body": f"{name} — outstanding {bill.get('amount')}.",
+                    "body": clean_alert_text(f"{name} - outstanding {bill.get('amount')}."),
                     "urgency": _urgency("bill_overdue", days),
                 }
             )
@@ -181,7 +182,7 @@ def build_notifications(db: Database, today: date) -> list[dict]:
                     "kind": "electricity",
                     "category": "bill_due_soon",
                     "title": "Bill due in 3 days",
-                    "body": f"{name} — due in {days} day(s).",
+                    "body": clean_alert_text(f"{name} - due in {days} day(s)."),
                     "urgency": _urgency("bill_due_soon", days),
                 }
             )
@@ -194,7 +195,7 @@ def build_notifications(db: Database, today: date) -> list[dict]:
                     "kind": "electricity",
                     "category": "bill_unpaid",
                     "title": "Electricity bill unpaid",
-                    "body": f"{name} — outstanding {bill.get('amount')}.",
+                    "body": clean_alert_text(f"{name} - outstanding {bill.get('amount')}."),
                     "urgency": _urgency("bill_unpaid", days),
                 }
             )

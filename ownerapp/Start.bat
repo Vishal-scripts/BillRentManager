@@ -34,6 +34,8 @@ if not defined TESS (
   echo Tesseract was not found. Installing it now...
   winget install --id UB-Mannheim.TesseractOCR -e --accept-package-agreements --accept-source-agreements
   if exist "%ProgramFiles%\Tesseract-OCR\tesseract.exe" set "TESS=%ProgramFiles%\Tesseract-OCR\tesseract.exe"
+  if not defined TESS if exist "%ProgramFiles(x86)%\Tesseract-OCR\tesseract.exe" set "TESS=%ProgramFiles(x86)%\Tesseract-OCR\tesseract.exe"
+  if not defined TESS if exist "%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe" set "TESS=%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"
 )
 if defined TESS (
   set "TESSERACT_CMD=%TESS%"

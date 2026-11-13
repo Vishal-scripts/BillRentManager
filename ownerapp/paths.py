@@ -1,7 +1,7 @@
 """Where this copy of the app keeps its database.
 
 The source checkout uses the repo folder. The portable Windows folder sets
-NARELA_HOME to the folder that contains NarelaRentApp.exe, so the database
+NARELA_HOME to the folder that contains BillRentManager.exe, so the database
 and logs sit next to that program and can be copied with it.
 """
 

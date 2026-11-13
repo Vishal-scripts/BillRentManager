@@ -21,6 +21,12 @@ if %ERRORLEVEL%==0 (
 ) else if exist "C:\Program Files\Tesseract-OCR\tesseract.exe" (
   echo Found Tesseract in Program Files.
   set "TESS_LINE=TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe"
+) else if exist "%ProgramFiles(x86)%\Tesseract-OCR\tesseract.exe" (
+  echo Found Tesseract in Program Files (x86).
+  set "TESS_LINE=TESSERACT_CMD=%ProgramFiles(x86)%\Tesseract-OCR\tesseract.exe"
+) else if exist "%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe" (
+  echo Found Tesseract in the per-user install folder.
+  set "TESS_LINE=TESSERACT_CMD=%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"
 ) else (
   echo Tesseract was not found. Install it, then run Setup.bat again:
   echo   winget install UB-Mannheim.TesseractOCR

@@ -147,6 +147,26 @@ LOCK_MINUTES = 5
 USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{1,31}$")
 
 
+def _sqlite_text(value):
+    """Decode SQLite text as UTF-8, and Windows-1252 when the bytes are not UTF-8.
+
+    A Windows-1252 em dash is the single byte 0x97. UTF-8 rejects that byte and
+    a replace decoder turns it into U+FFFD. Reading cp1252 recovers the dash so
+    ``clean_alert_text`` can store an ASCII hyphen instead.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    if not isinstance(value, (bytes, bytearray)):
+        return str(value)
+    raw = bytes(value)
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252")
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -185,12 +205,30 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys = ON")
+        self._configure_connection()
         self._conn.executescript(SCHEMA)
         self._ensure_columns()
         self._migrate_legacy_pin()
+        self._repair_alert_text()
         self._conn.commit()
+
+    def _configure_connection(self) -> None:
+        self._conn.row_factory = sqlite3.Row
+        self._conn.text_factory = _sqlite_text
+        self._conn.execute("PRAGMA foreign_keys = ON")
+
+    def _repair_alert_text(self) -> None:
+        from ownerapp.alerts import clean_alert_text
+
+        rows = self._conn.execute("SELECT id, title, body FROM alerts").fetchall()
+        for row in rows:
+            title = clean_alert_text(row["title"])
+            body = clean_alert_text(row["body"])
+            if title != row["title"] or body != row["body"]:
+                self._conn.execute(
+                    "UPDATE alerts SET title = ?, body = ? WHERE id = ?",
+                    (title, body, row["id"]),
+                )
 
     def _ensure_columns(self) -> None:
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(bill_jobs)")}
@@ -983,6 +1021,10 @@ class Database:
         return len(rows)
 
     def add_alert(self, kind: str, title: str, body: str, dedupe_key: str) -> bool:
+        from ownerapp.alerts import clean_alert_text
+
+        title = clean_alert_text(title)
+        body = clean_alert_text(body)
         with self._lock:
             try:
                 self._conn.execute(
@@ -1138,11 +1180,11 @@ class Database:
             self._conn.close()
             staged.replace(self.path)
             self._conn = sqlite3.connect(self.path, check_same_thread=False)
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA foreign_keys = ON")
+            self._configure_connection()
             self._conn.executescript(SCHEMA)
             self._ensure_columns()
             self._migrate_legacy_pin()
+            self._repair_alert_text()
             if kept_secret:
                 self._set("session_secret", kept_secret)
             elif not self._get("session_secret"):
