@@ -11,7 +11,7 @@ The day-to-day guide is [docs/OWNER_GUIDE.md](docs/OWNER_GUIDE.md). A handover f
 - **Home** shows rent due today, overdue rent, collected and pending amounts, unpaid bills, bills due within 3 days, and bill errors.
 - **Tenants** holds name, room, phone, rent, due day, 11-digit CA number, and notes. Search, import CSV or Excel, and export a coloured workbook.
 - **Rent** is one month at a time. Green is paid, amber is due soon, red is overdue, grey is unknown. Mark paid with an amount, a date, and Cash, UPI, Bank, or Other.
-- **Bills** checks each CA. Refresh one card, the ticked rows, the unpaid rows, or every CA. A live panel shows the step, the captcha try, the time so far, and a rough time left. Stop ends the queue after the current CA. A failed CA keeps the previous amount.
+- **Bills** checks each CA. Refresh one card, the ticked rows, the unpaid rows, or every CA. A live panel shows the step, the captcha try, the time so far, and a rough time left. Stop leaves the current CA unchecked and ends the queue within a few seconds. A failed CA keeps the previous amount.
 - **Sign-in** is a username plus a PIN. Up to 10 people. The first person is an admin. Staff can view, refresh bills, mark rent, and add or edit tenants. Staff cannot open Settings, delete a tenant, or restore a backup. Five wrong PINs lock that username for 5 minutes.
 - **Activity** (admin) records who marked rent, refreshed bills, or edited a tenant.
 - **Theme** is Light, Dark, or System. Light is the default. The control is in the top bar and in Settings.

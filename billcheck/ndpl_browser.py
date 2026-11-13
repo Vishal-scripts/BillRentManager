@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pytesseract import TesseractNotFoundError
 
-from billcheck.captcha import configure_tesseract, solve_captcha
+from billcheck.captcha import BillCheckStopped, configure_tesseract, solve_captcha
 from billcheck.ndpl import (
     BillResult,
     NdplClient,
@@ -54,7 +54,7 @@ class NdplBrowserClient:
             log=log,
         )
 
-    def fetch(self, ca_no: str, on_progress=None) -> BillResult:
+    def fetch(self, ca_no: str, on_progress=None, should_stop=None) -> BillResult:
         if sync_playwright is None:
             return NdplClient._error(
                 ca_no,
@@ -65,11 +65,14 @@ class NdplBrowserClient:
         checked = _now()
         last_note = "Captcha image was not confident, so it was not submitted"
         for attempt in range(self.captcha_tries):
+            if should_stop and should_stop():
+                raise BillCheckStopped()
             self._emit(on_progress, ca_no, attempt + 1, "captcha")
             if attempt:
-                self._pause(min(1.2, 0.35 * attempt))
+                if self._helper._wait(min(1.2, 0.35 * attempt), should_stop):
+                    raise BillCheckStopped()
             try:
-                html, err = self._submit_once(ca_no)
+                html, err = self._submit_once(ca_no, should_stop)
             except TesseractNotFoundError:
                 return NdplClient._error(ca_no, _TESSERACT_NOTE, checked)
             except Exception as exc:
@@ -93,17 +96,25 @@ class NdplBrowserClient:
     def _emit(self, on_progress, ca_no: str, captcha_try: int, phase: str) -> None:
         self._helper._emit(on_progress, ca_no, captcha_try, phase)
 
-    def _submit_once(self, ca_no: str) -> tuple[str, str | None]:
+    def _submit_once(self, ca_no: str, should_stop=None) -> tuple[str, str | None]:
+        if should_stop and should_stop():
+            raise BillCheckStopped()
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(channel="msedge", headless=True)
             context = browser.new_context(user_agent=USER_AGENT)
             page = context.new_page()
             page.goto(self.pay_url, timeout=self.timeout * 1000)
+            if should_stop and should_stop():
+                browser.close()
+                raise BillCheckStopped()
             page.fill("#txtcano", ca_no)
             page.fill("#txtemail", self.email)
             page.fill("#txtmobile", self.mobile)
             captcha = page.locator("#Img").screenshot()
-            total, _meta = solve_captcha(captcha)
+            total, meta = solve_captcha(captcha, should_stop=should_stop)
+            if (should_stop and should_stop()) or meta.get("stopped"):
+                browser.close()
+                raise BillCheckStopped()
             if total is None:
                 browser.close()
                 return "", "The captcha was not clear, so the number was not sent"

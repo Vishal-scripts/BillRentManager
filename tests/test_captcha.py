@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import sys
 import unittest
@@ -18,7 +19,15 @@ from PIL import Image, ImageDraw, ImageFont
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from billcheck.captcha import captcha_tries_from_env, ocr_addition, operands_from_ocr, read_operands  # noqa: E402
+from billcheck.captcha import (  # noqa: E402
+    BillCheckStopped,
+    captcha_pause,
+    captcha_tries_from_env,
+    choose_from_guesses,
+    ocr_addition,
+    operands_from_ocr,
+    read_operands,
+)
 from billcheck.check_bills import captcha_retry_needed, main  # noqa: E402
 from billcheck.ndpl import NdplClient  # noqa: E402
 
@@ -90,6 +99,18 @@ class OperandTests(unittest.TestCase):
     def test_rejects_guesses(self):
         for text in ("", "845", "16+22+1", "100+2", "16 22", "no numbers", "8++5"):
             self.assertIsNone(operands_from_ocr(text), text)
+
+    def test_four_or_five_in_the_plus_position_is_a_plus(self):
+        self.assertEqual(choose_from_guesses(["10528", "10428", "10+28", "10528"]), (10, 28))
+        self.assertEqual(choose_from_guesses(["22545", "22445", "22+45", "225545"]), (22, 45))
+        self.assertIsNone(choose_from_guesses(["10528"]))
+        self.assertIsNone(choose_from_guesses(["10+28", "40+28"]))
+
+    def test_pause_returns_as_soon_as_stop_is_set(self):
+        with mock.patch("billcheck.captcha.time.sleep") as slept:
+            stopped = captcha_pause(3, min_s=30, max_s=30, should_stop=lambda: True)
+        self.assertTrue(stopped)
+        self.assertEqual(slept.call_count, 0)
 
 
 class SampleImageTests(unittest.TestCase):
@@ -228,6 +249,35 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(result.status, "Error")
         self.assertIn("after 2 tries", result.note)
         self.assertIn("not clear", result.note)
+
+    def test_stop_between_tries_does_not_post_the_captcha(self):
+        self._ocr_patch.stop()
+        self._ocr_patch = mock.patch(
+            "billcheck.ndpl.solve_captcha",
+            return_value=(None, {"chosen_sum": None, "stopped": False}),
+        )
+        self._ocr_patch.start()
+        client = self._client(tries=6)
+        posts = []
+        gets = []
+
+        def get(url, timeout=None, headers=None):
+            gets.append(url)
+            if "Img.aspx" in url or "capt.aspx" in url:
+                return _Response(200, content=self.image)
+            return _Response(200, text=self.form)
+
+        def post(url, data, timeout=None, allow_redirects=True, headers=None):
+            posts.append(data)
+            return _Response(200, text=self.unpaid)
+
+        client.session.get = get
+        client.session.post = post
+        with mock.patch("billcheck.ndpl.captcha_pause", return_value=True):
+            with self.assertRaises(BillCheckStopped):
+                client.fetch("60099990003", should_stop=lambda: False)
+        self.assertEqual(posts, [])
+        self.assertEqual(sum(1 for url in gets if "Img.aspx" in url or "capt.aspx" in url), 1)
 
     def test_rejected_captcha_is_refreshed_and_then_read(self):
         client = self._client(tries=3)
@@ -526,6 +576,117 @@ class RetrySelectionTests(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
             out.unlink(missing_ok=True)
+
+
+class LiveGuessEvaluation(unittest.TestCase):
+    """Replay the 13 Nov 2026 captcha log. No images, no network.
+
+    A try the site accepted is a known-correct sum. A try the site rejected
+    is a known-wrong sum. A try that was not sent has no known answer.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        path = ROOT / "tests" / "fixtures" / "captcha_nov13.jsonl"
+        rows = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(json.loads(line))
+        tries = []
+        for index, row in enumerate(rows):
+            if row.get("site") == "wrong":
+                continue
+            outcome = "not_sent" if row.get("site") == "not_sent" else "accepted"
+            if row.get("site") == "submitting":
+                for nxt in rows[index + 1 : index + 3]:
+                    same = (
+                        nxt.get("event") == "captcha-try"
+                        and nxt.get("site") == "wrong"
+                        and nxt.get("ca") == row.get("ca")
+                        and nxt.get("captcha_try") == row.get("captcha_try")
+                    )
+                    if same:
+                        outcome = "wrong"
+                        break
+            tries.append((row, outcome))
+        cls.tries = tries
+
+    def test_logged_guesses_keep_every_sum_the_site_accepted(self):
+        from collections import defaultdict
+
+        accepted = wrong = not_sent = 0
+        kept = same_wrong = abstain_wrong = different = 0
+        newly = still_quiet = 0
+        batch = defaultdict(list)
+        for row, outcome in self.tries:
+            chosen = choose_from_guesses(row.get("guesses") or [])
+            got = None if chosen is None else chosen[0] + chosen[1]
+            if row["time"] >= "2026-11-13T18:32:36":
+                batch[row["ca"]].append((row, outcome, got))
+            if outcome == "accepted":
+                accepted += 1
+                self.assertEqual(got, row["chosen"], row["ca"])
+                if got == row["chosen"]:
+                    kept += 1
+            elif outcome == "wrong":
+                wrong += 1
+                if got == row["chosen"]:
+                    same_wrong += 1
+                elif got is None:
+                    abstain_wrong += 1
+                else:
+                    different += 1
+            else:
+                not_sent += 1
+                if got is None:
+                    still_quiet += 1
+                else:
+                    newly += 1
+        old_ok = regressed = unverified = still_fail = 0
+        for _ca, items in batch.items():
+            known = [row for row, outcome, _got in items if outcome == "accepted"]
+            if known:
+                old_ok += 1
+                again = choose_from_guesses(known[0].get("guesses") or [])
+                if again is None or again[0] + again[1] != known[0]["chosen"]:
+                    regressed += 1
+            elif any(got is not None for _row, _outcome, got in items):
+                unverified += 1
+            else:
+                still_fail += 1
+        print(
+            "captcha log 13 Nov 2026: "
+            f"accepted {kept}/{accepted} still chosen, "
+            f"rejected same {same_wrong} abstain {abstain_wrong} different {different} of {wrong}, "
+            f"not_sent now submit {newly} still quiet {still_quiet} of {not_sent}. "
+            f"22-CA run: site accepted {old_ok}/22, "
+            f"those images still solve {old_ok - regressed}, regressed {regressed}, "
+            f"previously unsolved would now submit {unverified} (not confirmed by the site), "
+            f"still no submit {still_fail}."
+        )
+        self.assertEqual(accepted, 16)
+        self.assertEqual(kept, 16)
+        self.assertEqual(wrong, 10)
+        self.assertEqual(same_wrong, 10)
+        self.assertEqual(abstain_wrong, 0)
+        self.assertEqual(different, 0)
+        self.assertEqual(not_sent, 69)
+        self.assertEqual(newly, 51)
+        self.assertEqual(still_quiet, 18)
+        self.assertEqual(old_ok, 14)
+        self.assertEqual(regressed, 0)
+        self.assertEqual(unverified, 8)
+        self.assertEqual(still_fail, 0)
+        ten = next(
+            row for row, outcome in self.tries
+            if row.get("ca") == "60019306855" and row.get("captcha_try") == 1 and outcome == "not_sent"
+        )
+        twenty = next(
+            row for row, outcome in self.tries
+            if row.get("ca") == "60019306855" and row.get("captcha_try") == 5 and outcome == "not_sent"
+        )
+        self.assertEqual(choose_from_guesses(ten["guesses"]), (10, 28))
+        self.assertEqual(choose_from_guesses(twenty["guesses"]), (22, 45))
 
 
 if __name__ == "__main__":

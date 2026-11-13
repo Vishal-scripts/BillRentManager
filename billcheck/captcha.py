@@ -19,6 +19,11 @@ from PIL import Image, ImageFilter, ImageOps
 
 _WHITELIST = "0123456789+"
 _MAX_OPERAND = 99
+_PLUS_CLUSTER = {"44", "45", "54", "55"}
+
+
+class BillCheckStopped(Exception):
+    """The owner pressed Stop before this CA was checked."""
 def captcha_debug_dir() -> Path:
     """Captcha images go under the data folder, not the source tree."""
     raw = os.environ.get("NARELA_HOME", "").strip().strip('"')
@@ -42,12 +47,32 @@ def captcha_tries_from_env(default: int = 6) -> int:
     return max(1, min(12, parsed))
 
 
-def captcha_pause(attempt: int = 0, *, min_s: float | None = None, max_s: float | None = None) -> None:
-    """Random delay between captcha attempts; slightly longer on later tries."""
+def captcha_pause(
+    attempt: int = 0,
+    *,
+    min_s: float | None = None,
+    max_s: float | None = None,
+    should_stop=None,
+) -> bool:
+    """Random delay between captcha attempts; slightly longer on later tries.
+
+    Returns True when ``should_stop`` asks to end the wait early.
+    """
     base_min = 1.5 if min_s is None else min_s
     base_max = 4.0 if max_s is None else max_s
     extra = min(2.0, 0.35 * max(0, attempt))
-    time.sleep(random.uniform(base_min + extra * 0.25, base_max + extra))
+    delay = random.uniform(base_min + extra * 0.25, base_max + extra)
+    if should_stop is None:
+        time.sleep(delay)
+        return False
+    end = time.monotonic() + delay
+    while True:
+        if should_stop():
+            return True
+        left = end - time.monotonic()
+        if left <= 0:
+            return False
+        time.sleep(min(0.2, left))
 
 
 def _bundled_tesseract_candidates() -> list[str]:
@@ -134,6 +159,87 @@ def _relaxed_pair(compact: str) -> tuple[int, int] | None:
     return None
 
 
+def _pair_ok(pair: tuple[int, int]) -> bool:
+    return 0 <= pair[0] <= _MAX_OPERAND and 0 <= pair[1] <= _MAX_OPERAND
+
+
+def _captcha_pair(text: str) -> tuple[str, tuple[int, int]] | None:
+    """Read one OCR string as ``NN+NN``.
+
+    A 4 or a 5 in the plus position is the plus. ``10528`` and ``10428`` are
+    both ``10+28``. A doubled ``44``, ``45``, ``54``, or ``55`` is the same
+    plus, kept only as support for a pair already seen another way.
+    """
+    compact = re.sub(r"\s+", "", text or "")
+    compact = re.sub(r"\+{2,}", "+", compact)
+    if not compact:
+        return None
+    match = re.fullmatch(r"(\d{1,2})\+(\d{1,2})", compact)
+    if match:
+        pair = (int(match.group(1)), int(match.group(2)))
+        return ("exact", pair) if _pair_ok(pair) else None
+    if not re.fullmatch(r"\d+", compact):
+        return None
+    if len(compact) == 5 and compact[2] in "45":
+        pair = (int(compact[:2]), int(compact[3:]))
+        kind = "plus4" if compact[2] == "4" else "plus5"
+        return (kind, pair) if _pair_ok(pair) else None
+    if len(compact) == 6 and compact[2:4] in _PLUS_CLUSTER:
+        pair = (int(compact[:2]), int(compact[4:]))
+        return ("doubled", pair) if _pair_ok(pair) else None
+    if len(compact) == 4:
+        pair = (int(compact[:2]), int(compact[2:]))
+        return ("dropped", pair) if _pair_ok(pair) else None
+    return None
+
+
+def _votes_from_reads(reads: list[str]) -> tuple[Counter[tuple[int, int]], dict[tuple[int, int], set[str]]]:
+    """Count operand pairs. A dropped or doubled plus only confirms a pair."""
+    votes: Counter[tuple[int, int]] = Counter()
+    channels: dict[tuple[int, int], set[str]] = {}
+    doubled: list[tuple[int, int]] = []
+    dropped: list[tuple[int, int]] = []
+    for text in reads:
+        parsed = _captcha_pair(text)
+        if not parsed:
+            continue
+        kind, pair = parsed
+        if kind == "doubled":
+            doubled.append(pair)
+            continue
+        if kind == "dropped":
+            dropped.append(pair)
+            continue
+        votes[pair] += 1
+        channels.setdefault(pair, set()).add(kind)
+    for pair in doubled:
+        if pair in votes:
+            votes[pair] += 1
+    for pair in dropped:
+        if pair in votes:
+            votes[pair] += 1
+    return votes, channels
+
+
+def choose_from_guesses(guesses: list[str]) -> tuple[int, int] | None:
+    """Pick one pair from raw OCR strings, or nothing if they do not agree.
+
+    An explicit ``NN+NN`` that already leads is kept. The 4/5-as-plus reading
+    is used only when those explicit reads do not agree, which is the usual
+    case on the live captcha.
+    """
+    exact: Counter[tuple[int, int]] = Counter()
+    for text in guesses:
+        parsed = _captcha_pair(text)
+        if parsed and parsed[0] == "exact":
+            exact[parsed[1]] += 1
+    chosen = _choose_pair(exact, {})
+    if chosen is not None:
+        return chosen
+    votes, channels = _votes_from_reads(guesses)
+    return _choose_pair(votes, channels)
+
+
 def read_operands(image_bytes: bytes) -> tuple[int, int] | None:
     total, _meta = solve_captcha(image_bytes)
     if total is None:
@@ -146,11 +252,14 @@ def ocr_addition(image_bytes: bytes) -> int | None:
     return total
 
 
-def solve_captcha(image_bytes: bytes) -> tuple[int | None, dict[str, Any]]:
-    """OCR with several preprocessings. Submit only when every read agrees, at least twice."""
+def solve_captcha(image_bytes: bytes, should_stop=None) -> tuple[int | None, dict[str, Any]]:
+    """OCR with several preprocessings. Submit only when the reads agree.
+
+    ``should_stop`` is checked between Tesseract calls so Stop does not wait
+    for every preprocessing of the current image.
+    """
     configure_tesseract()
     image = _flatten_rgba(Image.open(io.BytesIO(image_bytes)))
-    votes: Counter[tuple[int, int]] = Counter()
     raw_reads: list[str] = []
     small = max(image.size) < 140
     scale = 8 if max(image.size) < 120 else (6 if small else 3)
@@ -174,21 +283,37 @@ def solve_captcha(image_bytes: bytes) -> tuple[int | None, dict[str, Any]]:
                 _median_variant(image, scale=scale + 1),
             ]
         )
+
+    def stopped() -> bool:
+        return bool(should_stop and should_stop())
+
     for variant in variants:
         for psm in (7, 8, 13):
-            text, pair = _read_with_text(variant, psm)
+            if stopped():
+                return _stopped_meta(raw_reads)
+            text, _pair = _read_with_text(variant, psm)
             if text:
                 raw_reads.append(text.strip())
-            if pair is not None:
-                votes[pair] += 1
-    chosen = _choose_pair(votes)
+    votes, _channels = _votes_from_reads(raw_reads)
+    chosen = choose_from_guesses(raw_reads)
     meta: dict[str, Any] = {
         "guesses": raw_reads[:40],
         "votes": {f"{a}+{b}": count for (a, b), count in votes.most_common(12)},
         "chosen_pair": chosen,
         "chosen_sum": (chosen[0] + chosen[1]) if chosen else None,
+        "stopped": False,
     }
     return meta["chosen_sum"], meta
+
+
+def _stopped_meta(raw_reads: list[str]) -> tuple[None, dict[str, Any]]:
+    return None, {
+        "guesses": raw_reads[:40],
+        "votes": {},
+        "chosen_pair": None,
+        "chosen_sum": None,
+        "stopped": True,
+    }
 
 
 def save_captcha_attempt(
@@ -218,18 +343,37 @@ def save_captcha_attempt(
         return None
 
 
-def _choose_pair(votes: Counter[tuple[int, int]]) -> tuple[int, int] | None:
-    """Return a pair only when it leads every other reading by at least two votes.
+def _choose_pair(
+    votes: Counter[tuple[int, int]],
+    channels: dict[tuple[int, int], set[str]] | None = None,
+) -> tuple[int, int] | None:
+    """Return a pair only when the reads agree.
 
-    A single guess, a tie, or a one-vote lead such as 3 against 2 is left
-    unread so the checker refreshes the image instead of posting a sum.
+    The usual rule is unchanged: at least two votes, and a lead of two over
+    every other reading combined. A single guess, a tie, or a one-vote lead
+    is left unread.
+
+    A second path covers the live captcha, where ``+`` is often read as 4 or
+    5 and the other readings scatter. The leader is sent only when it has at
+    least four votes, leads the next pair by two, and the same pair was seen
+    both as a real plus and as a 4 or 5, or as both a 4 and a 5.
     """
     if not votes:
         return None
+    channels = channels or {}
     ranked = votes.most_common()
     pair, count = ranked[0]
     others = sum(item[1] for item in ranked[1:])
     if count >= 2 and count >= others + 2:
+        return pair
+    second = ranked[1][1] if len(ranked) > 1 else 0
+    kinds = channels.get(pair, set())
+    confirmed = (
+        {"exact", "plus4"} <= kinds
+        or {"exact", "plus5"} <= kinds
+        or {"plus4", "plus5"} <= kinds
+    )
+    if count >= 4 and count >= second + 2 and confirmed:
         return pair
     return None
 

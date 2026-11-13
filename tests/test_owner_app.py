@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import date
@@ -20,6 +21,7 @@ from ownerapp.db import Database  # noqa: E402
 from ownerapp.demo_bills import demo_fetch  # noqa: E402
 from ownerapp.importer import read_path  # noqa: E402
 from ownerapp.queue_logic import dedupe_jobs, lock_is_stale, merge_bill, select_cas  # noqa: E402
+from billcheck.captcha import BillCheckStopped  # noqa: E402
 from ownerapp.rent_logic import (  # noqa: E402
     months_to_close,
     parse_due_day,
@@ -225,6 +227,48 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(bad.status_code, 400)
         self.assertIn("11-digit", bad.json()["detail"])
 
+    def test_a_bill_date_older_than_three_months_is_flagged(self):
+        self.app.state.db.save_bill(
+            {
+                "ca_no": "60000000001",
+                "status": "Paid",
+                "amount": 0.0,
+                "due_date": "2023-09-18",
+                "exact_bill": 2318.0,
+                "bill_no": "040007958604",
+                "bill_date": "2023-09-18",
+                "consumer_name": "Sample",
+                "note": "",
+                "checked_at": "2026-11-13T18:29:36+00:00",
+                "check_state": "Done",
+            }
+        )
+        self.app.state.db.save_bill(
+            {
+                "ca_no": "60000000002",
+                "status": "Paid",
+                "amount": 0.0,
+                "due_date": "2026-10-16",
+                "exact_bill": 50.0,
+                "bill_no": "010000000002",
+                "bill_date": "2026-10-01",
+                "consumer_name": "Recent",
+                "note": "",
+                "checked_at": "2026-10-16T00:00:00+00:00",
+                "check_state": "Done",
+            }
+        )
+        rows = {row["ca_no"]: row for row in self.client.get("/api/bills").json()["bills"]}
+        self.assertTrue(rows["60000000001"]["stale_bill"])
+        self.assertIn("3 months", rows["60000000001"]["stale_note"])
+        self.assertTrue(rows["60000000001"]["stale_note"].isascii())
+        self.assertFalse(rows["60000000002"]["stale_bill"])
+        self.assertEqual(rows["60000000002"]["stale_note"], "")
+        tenant_id = rows["60000000001"]["tenant_id"]
+        detail = self.client.get(f"/api/tenants/{tenant_id}/detail").json()
+        self.assertTrue(detail["bill"]["stale_bill"])
+        self.assertIn("3 months", detail["bill"]["stale_note"])
+
     def test_first_run_asks_for_a_pin_in_the_browser(self):
         fresh = tempfile.TemporaryDirectory()
         users = Path(fresh.name) / "users.env"
@@ -426,6 +470,69 @@ class ContactAndImportTests(unittest.TestCase):
             self.assertEqual(snap["state"], "Stopped")
             self.assertTrue(any(item["step"] == "stopped" for item in snap["items"]))
             self.assertIn("Run summary", snap["summary"])
+            db.close()
+
+    def test_stop_leaves_the_current_ca_unchecked_within_a_few_seconds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "stop-fast.db")
+            db.save_tenant({"name": "Asha", "ca_no": "60000000001", "active": True})
+            db.save_tenant({"name": "Bela", "ca_no": "60000000002", "active": True})
+            db.save_bill(
+                {
+                    "ca_no": "60000000001",
+                    "status": "Paid",
+                    "amount": 10.0,
+                    "due_date": "2026-10-16",
+                    "exact_bill": 10.0,
+                    "bill_no": "010000000001",
+                    "bill_date": "2026-10-01",
+                    "consumer_name": "Asha",
+                    "note": "kept",
+                    "checked_at": "2026-10-16T00:00:00+00:00",
+                    "check_state": "Done",
+                }
+            )
+            entered = threading.Event()
+
+            def fetch(ca_no, on_progress=None, should_stop=None):
+                entered.set()
+                for attempt in range(1, 7):
+                    if should_stop and should_stop():
+                        raise BillCheckStopped()
+                    if on_progress:
+                        on_progress(
+                            {
+                                "ca_no": ca_no,
+                                "captcha_try": attempt,
+                                "captcha_tries": 6,
+                                "phase": "captcha",
+                            }
+                        )
+                    time.sleep(0.25)
+                return fast_fetch(ca_no, on_progress)
+
+            service = BillService(db, fetch=fetch, gap=0, today=lambda: TODAY)
+            service.start()
+            service.enqueue("all")
+            self.assertTrue(entered.wait(3))
+            started = time.perf_counter()
+            service.cancel()
+            deadline = time.time() + 3
+            while time.time() < deadline and service.snapshot().get("state") == "Running":
+                time.sleep(0.02)
+            elapsed = time.perf_counter() - started
+            service.stop()
+            snap = service.snapshot()
+            self.assertLess(elapsed, 2.0, snap.get("log"))
+            self.assertEqual(snap["state"], "Stopped")
+            self.assertTrue(snap["items"])
+            self.assertTrue(all(item["step"] == "stopped" for item in snap["items"]))
+            self.assertTrue(any("not checked" in (item.get("plain") or "") for item in snap["items"]))
+            kept = db.bill_map()["60000000001"]
+            self.assertEqual(kept["status"], "Paid")
+            self.assertEqual(kept["amount"], 10.0)
+            self.assertEqual(kept["note"], "kept")
+            self.assertNotEqual(kept["check_state"], "Checking")
             db.close()
 
     def test_backup_round_trip(self):

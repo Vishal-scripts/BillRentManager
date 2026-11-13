@@ -7,7 +7,12 @@ An Error result does not wipe a previous amount.
 
 from __future__ import annotations
 
+import calendar
+import re
+from datetime import date
+
 STALE_MS = 4 * 60 * 1000
+STALE_BILL_NOTE = "Bill date is more than 3 months old. Check that this is the latest bill."
 MODES = ("all", "unpaid", "error", "selected", "one")
 
 
@@ -100,6 +105,35 @@ def lock_is_stale(heartbeat_ms: int | None, now_ms: int, stale_ms: int = STALE_M
     if not heartbeat_ms:
         return True
     return now_ms - int(heartbeat_ms) >= stale_ms
+
+
+def months_before(day: date, months: int) -> date:
+    """The same calendar day, ``months`` earlier. The day is clamped."""
+    month = day.month - months
+    year = day.year
+    while month <= 0:
+        month += 12
+        year -= 1
+    last = calendar.monthrange(year, month)[1]
+    return date(year, month, min(day.day, last))
+
+
+def stale_bill_note(bill_date: str, today: date) -> str:
+    """Warn when the bill date is strictly older than three months.
+
+    An empty or unreadable date is not flagged. The parser still stores the
+    bill the site showed; this only tells the owner to look twice.
+    """
+    text = str(bill_date or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return ""
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError:
+        return ""
+    if parsed < months_before(today, 3):
+        return STALE_BILL_NOTE
+    return ""
 
 
 def merge_bill(previous: dict | None, result: dict) -> dict:

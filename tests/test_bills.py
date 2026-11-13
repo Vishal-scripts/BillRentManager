@@ -6,6 +6,7 @@ import csv
 import io
 import sys
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest import mock
 
@@ -25,6 +26,7 @@ from billcheck.parsers import (  # noqa: E402
 )
 from billcheck.captcha import ocr_addition  # noqa: E402
 from billcheck.check_bills import format_summary, post_webapp, summarize  # noqa: E402
+from ownerapp.queue_logic import STALE_BILL_NOTE, stale_bill_note  # noqa: E402
 
 
 FIXTURES = ROOT / "billcheck" / "fixtures"
@@ -133,6 +135,32 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.due_date, "2026-10-16")
         self.assertEqual(parsed.exact_bill, 1310.00)
         self.assertEqual(parsed.amount, 0.0)
+
+    def test_payment_history_does_not_replace_the_bill_date(self):
+        """Last-payment history is a separate table and is not the bill.
+
+        CA 60006016004 came back Paid with bill 040007958604 dated 18 Sep 2023
+        on a check in Nov 2026. That page is one BILL DETAILS table. History
+        labels are not copied into the bill date, bill number, or exact bill.
+        """
+        bill = (FIXTURES / "result_bill_details.html").read_text(encoding="utf-8")
+        history = (FIXTURES / "result_payment_history.html").read_text(encoding="utf-8")
+        history = history.replace("2-Oct-2026", "18-Sep-2023").replace("Rs. 980.00", "Rs. 2,318.00")
+        parsed = parse_bill_html(bill + history, expected_ca="60099990002")
+        self.assertEqual(parsed.bill_date, "2026-10-01")
+        self.assertEqual(parsed.bill_no, "010000000001")
+        self.assertEqual(parsed.exact_bill, 1310.00)
+        old = bill.replace("1-Oct-2026", "18-Sep-2023").replace("16-Oct-2026", "18-Sep-2023")
+        old = old.replace("Rs. 1310.00", "Rs. 2,318.00").replace("010000000001", "040007958604")
+        parsed_old = parse_bill_html(old, expected_ca="60099990002")
+        self.assertEqual(parsed_old.status, "Paid")
+        self.assertEqual(parsed_old.bill_date, "2023-09-18")
+        self.assertEqual(parsed_old.due_date, "2023-09-18")
+        self.assertEqual(parsed_old.exact_bill, 2318.0)
+        self.assertEqual(parsed_old.bill_no, "040007958604")
+        self.assertEqual(stale_bill_note(parsed_old.bill_date, date(2026, 11, 13)), STALE_BILL_NOTE)
+        self.assertEqual(stale_bill_note("2026-10-01", date(2026, 11, 13)), "")
+        self.assertEqual(stale_bill_note("", date(2026, 11, 13)), "")
 
     def test_outstanding_above_zero_is_unpaid_and_keeps_exact_bill(self):
         html = (FIXTURES / "result_bill_details.html").read_text(encoding="utf-8")

@@ -26,7 +26,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 from pytesseract import TesseractNotFoundError
 
-from billcheck.captcha import captcha_pause, save_captcha_attempt, solve_captcha
+from billcheck.captcha import BillCheckStopped, captcha_pause, save_captcha_attempt, solve_captcha
 from billcheck.parsers import (
     SITE_ERROR_NOTE,
     bill_parse_verified,
@@ -192,7 +192,7 @@ class NdplClient:
         self.session = requests.Session()
         self.session.headers.update(_session_headers())
 
-    def fetch(self, ca_no: str, on_progress=None) -> BillResult:
+    def fetch(self, ca_no: str, on_progress=None, should_stop=None) -> BillResult:
         checked = _now()
         if self.blocked_note:
             self._log("blocked-skip", ca=ca_no)
@@ -202,11 +202,13 @@ class NdplClient:
         self.captcha_images_attempted = 0
         self.captcha_solved = 0
         try:
-            result = self._fetch_with_site_retries(ca_no, checked, on_progress)
+            result = self._fetch_with_site_retries(ca_no, checked, on_progress, should_stop)
             if result.status in ("Paid", "Unpaid") and not _bill_result_verified(result, ca_no):
+                if should_stop and should_stop():
+                    raise BillCheckStopped()
                 self._log("verify-retry", ca=ca_no)
                 self.restart()
-                retry = self._fetch_with_site_retries(ca_no, checked, on_progress)
+                retry = self._fetch_with_site_retries(ca_no, checked, on_progress, should_stop)
                 if _bill_result_verified(retry, ca_no):
                     return retry
                 if retry.status in ("Paid", "Unpaid"):
@@ -228,7 +230,7 @@ class NdplClient:
             self._log("session-restart", ca=ca_no, error=str(exc))
             self.restart()
             try:
-                return self._fetch_with_site_retries(ca_no, checked, on_progress)
+                return self._fetch_with_site_retries(ca_no, checked, on_progress, should_stop)
             except WafBlocked:
                 self.blocked_note = _BLOCKED_MESSAGE
                 return self._error(ca_no, self.blocked_note, checked)
@@ -242,6 +244,8 @@ class NdplClient:
                     f"Network error after restarting the session: {exc2}",
                     checked,
                 )
+            except BillCheckStopped:
+                raise
             except Exception as exc2:
                 return self._error(
                     ca_no,
@@ -252,6 +256,8 @@ class NdplClient:
             return self._error(ca_no, _timeout_note(exc), checked)
         except requests.RequestException as exc:
             return self._error(ca_no, f"Network error: {exc}", checked)
+        except BillCheckStopped:
+            raise
         except Exception as exc:
             return self._error(ca_no, f"Bill check failed: {exc}", checked)
 
@@ -277,10 +283,12 @@ class NdplClient:
         self.restarts += 1
         self._log("session-restarted", restarts=self.restarts)
 
-    def _fetch_with_site_retries(self, ca_no: str, checked: str, on_progress=None) -> BillResult:
+    def _fetch_with_site_retries(self, ca_no: str, checked: str, on_progress=None, should_stop=None) -> BillResult:
         for attempt in range(_SITE_ERROR_ATTEMPTS):
+            if should_stop and should_stop():
+                raise BillCheckStopped()
             try:
-                result = self._fetch_once(ca_no, checked, on_progress)
+                result = self._fetch_once(ca_no, checked, on_progress, should_stop)
             except SiteErrorPage:
                 result = self._error(ca_no, SITE_ERROR_NOTE, checked)
             if result.status != "Error" or SITE_ERROR_NOTE not in (result.note or ""):
@@ -290,7 +298,8 @@ class NdplClient:
                 break
             self._log("site-error-retry", ca=ca_no, attempt=attempt + 1)
             self.restart()
-            self._pause(_SITE_ERROR_BACKOFF[min(attempt, len(_SITE_ERROR_BACKOFF) - 1)])
+            if self._wait(float(_SITE_ERROR_BACKOFF[min(attempt, len(_SITE_ERROR_BACKOFF) - 1)]), should_stop):
+                raise BillCheckStopped()
         return self._error(
             ca_no,
             f"{last} (after {_SITE_ERROR_ATTEMPTS} tries with a fresh session).",
@@ -386,6 +395,22 @@ class NdplClient:
         report["report_path"] = str(path)
         return report
 
+    def _wait(self, seconds: float, should_stop=None) -> bool:
+        """Sleep up to ``seconds``. Return True when stop was requested."""
+        if seconds <= 0:
+            return bool(should_stop and should_stop())
+        if should_stop is None:
+            self._pause(seconds)
+            return False
+        end = time.monotonic() + seconds
+        while True:
+            if should_stop():
+                return True
+            left = end - time.monotonic()
+            if left <= 0:
+                return False
+            self._pause(min(0.2, left))
+
     def _emit(self, on_progress, ca_no: str, captcha_try: int, phase: str) -> None:
         if on_progress is None:
             return
@@ -401,7 +426,7 @@ class NdplClient:
         except Exception:
             return
 
-    def _fetch_once(self, ca_no: str, checked: str, on_progress=None) -> BillResult:
+    def _fetch_once(self, ca_no: str, checked: str, on_progress=None, should_stop=None) -> BillResult:
         self._emit(on_progress, ca_no, 0, "opening")
         try:
             page = self._get(self.pay_url)
@@ -419,12 +444,16 @@ class NdplClient:
         image_url = _captcha_image_url(page, self.pay_url)
         last_note = "Captcha image was not confident, so it was not submitted"
         for attempt in range(self.captcha_tries):
+            if should_stop and should_stop():
+                raise BillCheckStopped()
             self.last_captcha_attempts = attempt + 1
             self.captcha_images_attempted += 1
             self._emit(on_progress, ca_no, attempt + 1, "captcha")
             if attempt:
-                captcha_pause(attempt)
-                self._pause(min(1.2, 0.35 * attempt))
+                if captcha_pause(attempt, should_stop=should_stop):
+                    raise BillCheckStopped()
+                if self._wait(min(1.2, 0.35 * attempt), should_stop):
+                    raise BillCheckStopped()
                 try:
                     page = self._get(self.pay_url)
                 except (WafBlocked, SiteDown):
@@ -446,9 +475,11 @@ class NdplClient:
             except requests.RequestException as exc:
                 return self._error(ca_no, f"Captcha image failed: {exc}", checked)
             try:
-                total, ocr_meta = solve_captcha(image)
+                total, ocr_meta = solve_captcha(image, should_stop=should_stop)
             except TesseractNotFoundError:
                 return self._error(ca_no, _TESSERACT_NOTE, checked)
+            except BillCheckStopped:
+                raise
             except Exception as exc:
                 last_note = f"Captcha image could not be read ({exc})"
                 save_captcha_attempt(
@@ -469,6 +500,10 @@ class NdplClient:
                     site="read_error",
                 )
                 continue
+            if should_stop and should_stop():
+                raise BillCheckStopped()
+            if ocr_meta.get("stopped"):
+                raise BillCheckStopped()
             if total is None:
                 last_note = "The captcha was not clear, so the number was not sent"
                 save_captcha_attempt(
@@ -498,6 +533,8 @@ class NdplClient:
                 chosen=ocr_meta.get("chosen_sum"),
                 site="submitting",
             )
+            if should_stop and should_stop():
+                raise BillCheckStopped()
             data = _form_post_data(fields, ca_no, self.mobile, self.email, total)
             try:
                 response = self.session.post(
