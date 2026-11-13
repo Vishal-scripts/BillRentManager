@@ -9,11 +9,17 @@ from ownerapp.db import Database, utc_now
 from ownerapp.rent_logic import month_key
 
 
-def demo_fetch(ca_no: str, on_progress=None, tries: int = 6, pause: float = 0) -> dict:
+def demo_fetch(ca_no: str, on_progress=None, tries: int = 6, pause: float = 0, should_stop=None) -> dict:
+    from billcheck.captcha import BillCheckStopped
+
+    if should_stop and should_stop():
+        raise BillCheckStopped()
     if on_progress:
         on_progress({"ca_no": ca_no, "captcha_try": 0, "captcha_tries": tries, "phase": "opening"})
     steps = 2 if tries >= 2 else 1
     for attempt in range(1, steps + 1):
+        if should_stop and should_stop():
+            raise BillCheckStopped()
         if on_progress:
             on_progress(
                 {
@@ -24,7 +30,11 @@ def demo_fetch(ca_no: str, on_progress=None, tries: int = 6, pause: float = 0) -
                 }
             )
         if pause:
-            time.sleep(pause)
+            end = time.monotonic() + pause
+            while time.monotonic() < end:
+                if should_stop and should_stop():
+                    raise BillCheckStopped()
+                time.sleep(min(0.2, end - time.monotonic()))
     if on_progress:
         on_progress({"ca_no": ca_no, "captcha_try": steps, "captcha_tries": tries, "phase": "reading"})
     checked = utc_now()

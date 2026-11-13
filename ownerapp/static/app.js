@@ -557,6 +557,11 @@ function billFilterLabel(key) {
   return { all: "All", unpaid: "Unpaid", paid: "Paid", due: "Due soon", error: "Error" }[key];
 }
 
+function staleHtml(row) {
+  if (!row || !row.stale_note) return "";
+  return `<p class="stale-bill">${esc(row.stale_note)}</p>`;
+}
+
 function billChip(row) {
   const status = String(row.status || "");
   const check = String(row.check_state || "");
@@ -645,6 +650,7 @@ function tenantCard(row) {
           <h3>Electricity bill</h3>
           ${row.ca_no ? kvRow("CA", row.ca_no) : `<p class="muted">No CA number</p>`}
           ${bill ? `${chip ? `<span class="chip chip-${esc(chip.toLowerCase().replace(/ /g, "-"))}">${esc(chip)}</span>` : ""}
+          ${staleHtml(bill)}
           ${kvRow("Outstanding", money(bill.amount), true)}
           ${kvRow("Due", bill.due_date ? formatWhen(bill.due_date, false) : "")}
           ${kvRow("Exact bill", money(bill.exact_bill))}` : ""}
@@ -750,6 +756,7 @@ function tenantDetailHtml() {
         <section class="detail-section">
           <h3>Electricity bill</h3>
           ${bill ? `${chip ? `<span class="chip chip-${esc(chip.toLowerCase().replace(/ /g, "-"))}">${esc(chip)}</span>` : ""}
+          ${staleHtml(bill)}
           ${kvRow("Outstanding", money(bill.amount), true)}
           ${kvRow("Exact bill", money(bill.exact_bill), true)}
           ${kvRow("Due", bill.due_date ? formatWhen(bill.due_date, false) : "")}
@@ -783,6 +790,7 @@ function billCard(row) {
         <section class="detail-section">
           <h3>Electricity bill</h3>
           ${chip ? `<span class="chip chip-${esc(chip.toLowerCase().replace(/ /g, "-"))}">${esc(chip)}</span>` : ""}
+          ${staleHtml(row)}
           ${kvRow("Outstanding", money(row.amount), true)}
           ${kvRow("Exact bill", money(row.exact_bill), true)}
           ${kvRow("Due", row.due_date ? formatWhen(row.due_date, false) : "")}
@@ -1140,7 +1148,7 @@ function wireBills() {
   const stop = document.getElementById("stop-run");
   if (stop) stop.onclick = async () => {
     await api("/api/bills/cancel", { method: "POST" });
-    toast("Stopping after the current CA.");
+    toast("Stopping. The current CA will not be checked.");
   };
   document.getElementById("toggle-log").onclick = () => { state.logOpen = !state.logOpen; draw(); };
   document.getElementById("toggle-runs").onclick = () => { state.runsOpen = !state.runsOpen; draw(); };

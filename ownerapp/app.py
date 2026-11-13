@@ -23,6 +23,7 @@ from ownerapp.doctor import run_checks
 from ownerapp.exporter import build_template, build_workbook
 from ownerapp.importer import read_upload
 from ownerapp.paths import home, phone_url
+from ownerapp.queue_logic import stale_bill_note
 from ownerapp.rent_logic import month_key, parse_rent
 from ownerapp.service import BillService
 from ownerapp.users_file import UserDirectory, pin_too_easy
@@ -311,6 +312,7 @@ def create_app(
         )
         ca = tenant.get("ca_no") or ""
         bill = app.state.db.bill_map().get(ca) if ca else None
+        bill = _with_stale(bill, today)
         bill_history = [row for row in app.state.db.bill_history_rows() if row.get("ca_no") == ca]
         return {
             "tenant": tenant,
@@ -482,10 +484,20 @@ def create_app(
         app.state.db.log_activity(user["username"], "mark rent", status)
         return {"ok": True}
 
+    def _with_stale(bill: dict | None, today: date) -> dict | None:
+        if not bill:
+            return bill
+        noted = dict(bill)
+        message = stale_bill_note(noted.get("bill_date") or "", today)
+        noted["stale_bill"] = bool(message)
+        noted["stale_note"] = message
+        return noted
+
     @app.get("/api/bills")
     def bills(_: None = Depends(signed_in)):
+        today = current_day()
         return {
-            "bills": app.state.db.bill_rows(),
+            "bills": [_with_stale(row, today) for row in app.state.db.bill_rows()],
             "progress": app.state.service.snapshot(),
             "today": current_day().isoformat(),
             "receipt_ready": app.state.db.public_settings()["receipt_ready"],

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import queue
 import sys
@@ -14,7 +15,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from billcheck.captcha import captcha_tries_from_env  # noqa: E402
+from billcheck.captcha import BillCheckStopped, captcha_tries_from_env  # noqa: E402
 
 from ownerapp.alerts import sync_alerts
 from ownerapp.contacts import normalize_mobile, receipt_message, receipt_ready
@@ -128,7 +129,7 @@ class BillService:
         self._cancel.set()
         self._wake.set()
         if self.progress.get("state") == "Running":
-            self.progress["message"] = "Stopping after the current CA."
+            self.progress["message"] = "Stopping. The current CA will not be checked."
             self._publish()
         return {"ok": True}
 
@@ -273,7 +274,7 @@ class BillService:
                 break
             pause = self._pause()
             if index and pause:
-                time.sleep(pause)
+                self._wait(pause)
             if self._cancel.is_set():
                 stopped += self._stop_rest(jobs[index:], items, log, index)
                 break
@@ -299,6 +300,9 @@ class BillService:
 
             try:
                 result = self._fetch(job["ca_no"], on_progress)
+            except BillCheckStopped:
+                stopped += self._stop_rest(jobs[index:], items, log, index)
+                break
             except Exception as exc:
                 result = {
                     "ca_no": job["ca_no"],
@@ -403,12 +407,16 @@ class BillService:
         count = 0
         for offset, job in enumerate(jobs):
             index = start_index + offset
+            was_open = items[index].get("step") not in ("waiting", "")
             self.db.finish_job(job["id"], "Stopped", "Stopped before this CA was checked.")
             self.db.set_check_states([job["ca_no"]], "")
             items[index]["step"] = "stopped"
             items[index]["plain"] = "Stopped. This CA was not checked."
             items[index]["fix"] = "Press Retry this to check it again."
-            log.append(f"Stopped {job['ca_no']} before opening the site.")
+            if was_open:
+                log.append(f"Stopped {job['ca_no']}. This CA was not checked.")
+            else:
+                log.append(f"Stopped {job['ca_no']} before opening the site.")
             count += 1
         return count
 
@@ -435,9 +443,15 @@ class BillService:
 
     def _fetch(self, ca_no: str, on_progress) -> dict:
         if self.fetch:
-            return self.fetch(ca_no, on_progress)
+            return self._call_fetch(ca_no, on_progress)
         if self.demo:
-            return demo_fetch(ca_no, on_progress, tries=self._tries(), pause=0.7)
+            return demo_fetch(
+                ca_no,
+                on_progress,
+                tries=self._tries(),
+                pause=0.7,
+                should_stop=self._cancel.is_set,
+            )
         from billcheck.ndpl import NdplClient
 
         email = (self.db.setting("receipt_email") or "").strip()
@@ -456,7 +470,11 @@ class BillService:
                 debug_dir=data_dir() / "debug",
                 log=lambda event, **fields: self._log(event, **fields),
             )
-        result = self._client.fetch(ca_no, on_progress=on_progress).as_dict()
+        result = self._client.fetch(
+            ca_no,
+            on_progress=on_progress,
+            should_stop=self._cancel.is_set,
+        ).as_dict()
         if mode == "auto" and result.get("status") == "Error":
             browser = self._browser_fetch(ca_no, on_progress, email, mobile)
             if browser.get("status") != "Error":
@@ -474,7 +492,11 @@ class BillService:
                 debug_dir=data_dir() / "debug",
                 log=lambda event, **fields: self._log(event, **fields),
             )
-        return self._browser_client.fetch(ca_no, on_progress=on_progress).as_dict()
+        return self._browser_client.fetch(
+            ca_no,
+            on_progress=on_progress,
+            should_stop=self._cancel.is_set,
+        ).as_dict()
 
     def _bill_check_mode(self) -> str:
         raw = (self.db.setting("bill_check_mode") or "auto").strip().lower()
@@ -496,6 +518,21 @@ class BillService:
             return max(1, min(12, int(self.db.setting("captcha_tries") or "6")))
         except ValueError:
             return 6
+
+    def _call_fetch(self, ca_no: str, on_progress):
+        fn = self.fetch
+        if fn is None:
+            raise RuntimeError("No bill check is configured.")
+        if "should_stop" in inspect.signature(fn).parameters:
+            return fn(ca_no, on_progress, should_stop=self._cancel.is_set)
+        return fn(ca_no, on_progress)
+
+    def _wait(self, seconds: float) -> None:
+        end = time.monotonic() + max(0.0, seconds)
+        while time.monotonic() < end:
+            if self._cancel.is_set() or self._stop.is_set():
+                return
+            time.sleep(min(0.2, end - time.monotonic()))
 
     def _pause(self) -> float:
         if self.gap is not None:
